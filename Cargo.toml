@@ -1,8 +1,8 @@
 [package]
 name = "igtop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "Terminal monitor for Intel GPUs on the i915 driver: per-engine utilisation from the i915 PMU, per-process and per-container attribution"
+description = "Terminal monitor for Intel GPUs on the i915 driver"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/lukazibi83/igtop"
 readme = "README.md"
@@ -13,6 +13,32 @@ categories = ["command-line-utilities", "hardware-support"]
 ratatui = "=0.29.0"
 crossterm = "=0.28.1"
 libc = "0.2"
+
+# Debian and Ubuntu package (`cargo deb`). Release builds package the static
+# musl binary, so the package has no library dependencies.
+[package.metadata.deb]
+maintainer = "lukazibi83 <205174930+lukazibi83@users.noreply.github.com>"
+copyright = "lukazibi83"
+section = "utils"
+priority = "optional"
+extended-description = """\
+Terminal monitor for Intel GPUs on the i915 driver (Arc Alchemist and integrated \
+graphics): per-engine utilisation from the i915 PMU, achieved clock, temperature, \
+power, VRAM and throttle reasons, and per-process attribution labelled with the \
+container or VM each process runs in. Needs root."""
+recommends = "hwdata | pci.ids"
+assets = [
+    ["target/release/igtop", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/igtop/README.md", "644"],
+]
+
+# Fedora, RHEL and openSUSE package (`cargo generate-rpm`).
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/igtop", dest = "/usr/bin/igtop", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/igtop/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/igtop/LICENSE", mode = "644", doc = true },
+]
 
 [profile.release]
 opt-level = 3

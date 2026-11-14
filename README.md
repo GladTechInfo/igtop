@@ -84,6 +84,19 @@ Reports from other cards are welcome.
 
 ## Installing
 
+Each [release](https://github.com/lukazibi83/igtop/releases/latest) carries
+ready-made builds, checked against `SHA256SUMS`:
+
+| File | For |
+|---|---|
+| `igtop_<version>-1_amd64.deb` | Debian, Ubuntu, Proxmox: `sudo apt install ./igtop_*.deb` |
+| `igtop-<version>-1.x86_64.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE: `sudo dnf install ./igtop-*.rpm` (or `zypper install`) |
+| `igtop-<version>-x86_64-linux` | Any x86-64 Linux: a static binary, no dependencies; `chmod +x` and run |
+
+All three contain the same static binary, so they behave identically on any
+distribution. Each is installed and run in containers of the distributions it
+is for before a release is published.
+
 **Arch Linux and derivatives:** an AUR package is on its way (AUR account
 registration is paused at the time of writing). Until then, build the same
 package from this repository:
