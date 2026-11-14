@@ -1,0 +1,24 @@
+[package]
+name = "igtop"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal monitor for Intel GPUs on the i915 driver: per-engine utilisation from the i915 PMU, per-process and per-container attribution"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/lukazibi83/igtop"
+readme = "README.md"
+keywords = ["intel", "gpu", "i915", "monitor", "tui"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[dependencies]
+ratatui = "=0.29.0"
+crossterm = "=0.28.1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# Nothing here unwinds deliberately, and ratatui's panic hook still restores
+# the terminal, since the hook runs before the abort.
+panic = "abort"
