@@ -82,6 +82,15 @@ Reports from other cards are welcome.
   scan. Without it, VRAM is omitted and clients are found by walking `/proc`.
 - A [Nerd Font](https://www.nerdfonts.com/) for the icons, or `--no-icons`.
 
+## Installing
+
+**Arch Linux and derivatives:** an AUR package is on its way (AUR account
+registration is paused at the time of writing). Until then, build the same
+package from this repository:
+
+    git clone https://github.com/lukazibi83/igtop
+    cd igtop/packaging/aur && makepkg -si
+
 ## Building
 
 With a Rust toolchain ([rustup](https://rustup.rs/)):
