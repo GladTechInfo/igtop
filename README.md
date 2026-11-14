@@ -3,6 +3,8 @@
 A terminal monitor for Intel GPUs on the `i915` driver — Arc Alchemist cards and
 integrated graphics — that reads the kernel's own counters instead of guessing.
 
+![igtop monitoring an Arc A380 during a hardware transcode](docs/screenshot.png)
+
 - **Per-engine utilisation** for every video, video-enhance, render, copy and
   compute engine, as true time ratios from the i915 PMU.
 - **The clock the GPU actually ran at**, not the requested cap.
