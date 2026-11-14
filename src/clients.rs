@@ -30,8 +30,9 @@ pub struct Client {
     pub container: Option<String>,
     pub client_id: u64,
     pub pdev: String,
-    /// Cumulative busy nanoseconds keyed by the fdinfo engine name
-    /// (`render`, `copy`, `video`, `video-enhance`, `compute`).
+    /// Cumulative busy nanoseconds keyed by the fdinfo engine name: for i915
+    /// `render`, `copy`, `video`, `video-enhance`, `compute`; for amdgpu `gfx`,
+    /// `compute`, `dma`, `dec`, `enc`, `enc_1`, `jpeg`.
     pub engines: HashMap<String, u64>,
     /// Engine-class capacity, e.g. `video: 2` on a part with vcs0 and vcs1.
     /// fdinfo reports the *sum* across the class, so a percentage derived from
@@ -360,8 +361,14 @@ impl ClientTracker {
     }
 
     pub fn update(&mut self, pdev_filter: Option<&str>) -> Vec<ClientRate> {
+        self.update_with(scan(pdev_filter))
+    }
+
+    /// As `update`, from a scan the caller has already made: amdgpu's engine
+    /// figures come from the same scan, so the processes are walked once.
+    pub fn update_with(&mut self, scanned: Vec<Client>) -> Vec<ClientRate> {
         let now = Instant::now();
-        let current: ClientMap = scan(pdev_filter)
+        let current: ClientMap = scanned
             .into_iter()
             .map(|c| ((c.pdev.clone(), c.client_id), c))
             .collect();

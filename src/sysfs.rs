@@ -6,6 +6,12 @@
 //! still read here is the frequency ceiling — the clock itself comes from the
 //! PMU. (`gt_cur_freq_mhz` is precisely the file nvtop misreads as the achieved
 //! clock; it is the requested cap.)
+//!
+//! amdgpu cards are read from the same places where the files coincide (hwmon,
+//! PCIe link) and from amdgpu's own otherwise: `pp_dpm_sclk` for the clock
+//! ceiling, `mem_info_vram_*` for VRAM, `gpu_busy_percent` and
+//! `mem_busy_percent` for the firmware's load figures, and the hwmon `sclk`
+//! input for the clock itself, which amdgpu reports as achieved, not requested.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,7 +82,8 @@ pub struct Static {
     pub power_max_w: f64,
     pub temp_max_c: f64,
     pub vram_total_bytes: u64,
-    /// Extent of BAR 2, the CPU's window onto device memory. Not VRAM: with
+    /// Extent of the CPU's window onto device memory: BAR 2 on Intel, BAR 0
+    /// on AMD. Not VRAM: with
     /// resizable BAR it can exceed the memory it windows, and without it — on
     /// a platform with no ReBAR support — it is 256 MiB against, say, 6 GB.
     pub bar_bytes: u64,
@@ -86,10 +93,18 @@ pub struct Static {
     pub link_max: Option<Link>,
     /// The card's own capability, for reference.
     pub link_dev_max: Option<Link>,
+    /// Which hwmon temperature TEMP shows: `edge`, `junction`, or empty where
+    /// the sensor is unlabelled (i915).
+    pub temp_label: String,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Dynamic {
+    /// amdgpu's firmware figures: graphics load and memory-controller load.
+    pub gpu_busy_pct: Option<f64>,
+    pub mem_busy_pct: Option<f64>,
+    /// amdgpu's achieved shader clock, from hwmon.
+    pub sclk_mhz: Option<f64>,
     /// rc6 residency over the interval, from the hardware counter.
     pub rc6_pct: Option<f64>,
     pub temp_c: Option<f64>,
@@ -113,43 +128,83 @@ pub struct Reader {
     last_rc6: Option<(Instant, u64)>,
     /// Last VRAM reading and when it was taken.
     vram: Option<(Instant, Option<u64>)>,
+    /// The card is on amdgpu rather than i915.
+    amd: bool,
+    /// An amdgpu APU. Its hwmon power is the whole package's, and its PCIe
+    /// link is an internal one, so neither is shown.
+    integrated: bool,
+    /// The hwmon temperature input TEMP reads.
+    temp: Option<PathBuf>,
+    /// amdgpu's hwmon `sclk` frequency input, in Hz.
+    sclk: Option<PathBuf>,
     pub stat: Static,
+}
+
+/// The hwmon input labelled `label` (`temp2_label` reading `junction` gives
+/// `temp2_input`), for the `kind` of sensor named.
+fn hwmon_labelled(h: &Path, kind: &str, label: &str) -> Option<PathBuf> {
+    (1..=16).find_map(|i| {
+        let l = read_trim(&h.join(format!("{}{}_label", kind, i)))?;
+        (l == label).then(|| h.join(format!("{}{}_input", kind, i)))
+    })
+}
+
+/// The highest level in an amdgpu `pp_dpm_*` table, whose lines read
+/// `1: 2550Mhz *`.
+fn dpm_max_mhz(body: &str) -> Option<u64> {
+    body.lines()
+        .filter_map(|l| {
+            let v = l.split_whitespace().nth(1)?;
+            v.to_ascii_lowercase().strip_suffix("mhz")?.parse::<u64>().ok()
+        })
+        .max()
+}
+
+/// amdgpu's `gpu_metrics` header is `u16 size, u8 format, u8 content`. Format
+/// 1 is the discrete-GPU table; 2 and later are APU tables.
+fn amd_is_apu(dev: &Path) -> bool {
+    fs::read(dev.join("gpu_metrics")).ok().and_then(|b| b.get(2).copied()).map(|f| f >= 2).unwrap_or(false)
 }
 
 /// Where the PCI ID database may live: Debian and Proxmox ship it in
 /// `/usr/share/misc`, Arch and Fedora in `/usr/share/hwdata`.
 const PCI_IDS: [&str; 3] = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids", "/usr/share/pci.ids"];
 
-/// The marketing name for an Intel device ID, from the system's `pci.ids`,
-/// with an honest hex fallback rather than a guess. Hard-coding a table would
-/// go stale with every new part; `pci.ids` is maintained upstream.
-fn device_name(pci_id: &str) -> String {
+/// The marketing name for a device ID, from the system's `pci.ids`, with an
+/// honest hex fallback rather than a guess. Hard-coding a table would go stale
+/// with every new part; `pci.ids` is maintained upstream.
+fn device_name(vendor_id: &str, pci_id: &str) -> String {
+    let vendor = vendor_id.trim_start_matches("0x").to_ascii_lowercase();
     let id = pci_id.trim_start_matches("0x").to_ascii_lowercase();
     PCI_IDS
         .iter()
         .find_map(|p| fs::read_to_string(p).ok())
-        .and_then(|db| pci_ids_name(&db, &id))
-        .unwrap_or_else(|| format!("Intel GPU {}", pci_id))
+        .and_then(|db| pci_ids_name(&db, &vendor, &id))
+        .unwrap_or_else(|| match vendor.as_str() {
+            "1002" => format!("AMD GPU {}", pci_id),
+            _ => format!("Intel GPU {}", pci_id),
+        })
 }
 
-/// Looks `device` up under vendor 8086 in a `pci.ids` body. Entries read like
-/// `DG2 [Arc A380]` or `CoffeeLake-S GT2 [UHD Graphics 630]`; the bracketed
-/// product name leads, with the codename after it.
-fn pci_ids_name(db: &str, device: &str) -> Option<String> {
-    let mut in_intel = false;
+/// Looks `device` up under `vendor` (`8086`, `1002`) in a `pci.ids` body.
+/// Entries read like `DG2 [Arc A380]` or `Navi 21 [Radeon RX 6950 XT]`; the
+/// bracketed product name leads, with the codename after it.
+fn pci_ids_name(db: &str, vendor: &str, device: &str) -> Option<String> {
+    let vendor_line = format!("{} ", vendor);
+    let mut in_vendor = false;
     for line in db.lines() {
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
         if !line.starts_with('\t') {
             // A vendor line, or the device-class section that ends the list.
-            if in_intel {
+            if in_vendor {
                 return None;
             }
-            in_intel = line.starts_with("8086 ");
+            in_vendor = line.starts_with(&vendor_line);
             continue;
         }
-        if !in_intel || line.starts_with("\t\t") {
+        if !in_vendor || line.starts_with("\t\t") {
             continue;
         }
         let entry = &line[1..];
@@ -182,7 +237,20 @@ impl Reader {
             .ok()
             .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
             .unwrap_or_default();
-        let link_nodes = host_link_nodes(&card.join("device"));
+        let dev = card.join("device");
+        let amd = fs::canonicalize(dev.join("driver"))
+            .ok()
+            .is_some_and(|p| p.file_name().is_some_and(|f| f == "amdgpu"));
+        let integrated = amd && amd_is_apu(&dev);
+        let link_nodes = if integrated { None } else { host_link_nodes(&dev) };
+        // amdgpu labels its sensors. Junction (hotspot) is the one the card
+        // throttles on, so it is preferred over edge where both exist.
+        let temp = hwmon.as_ref().map(|h| {
+            hwmon_labelled(h, "temp", "junction")
+                .or_else(|| hwmon_labelled(h, "temp", "edge"))
+                .unwrap_or_else(|| h.join("temp1_input"))
+        });
+        let sclk = hwmon.as_ref().filter(|_| amd).and_then(|h| hwmon_labelled(h, "freq", "sclk"));
         let rc6 = gt
             .as_ref()
             .map(|g| g.join("rc6_residency_ms"))
@@ -199,6 +267,10 @@ impl Reader {
             rc6,
             last_rc6: None,
             vram: None,
+            amd,
+            integrated,
+            temp,
+            sclk,
             stat: Static::default(),
         };
         r.load_static();
@@ -219,14 +291,26 @@ impl Reader {
     fn load_static(&mut self) {
         let dev = self.card.join("device");
         let pci_id = read_trim(&dev.join("device")).unwrap_or_else(|| "0x0000".into());
-        self.stat.name = device_name(&pci_id);
+        let vendor = read_trim(&dev.join("vendor")).unwrap_or_else(|| "0x8086".into());
+        self.stat.name = device_name(&vendor, &pci_id);
 
-        self.stat.freq_max_mhz = self.gt_attr("rps_max_freq_mhz", "gt_max_freq_mhz").unwrap_or(0);
+        self.stat.freq_max_mhz = if self.amd {
+            read_trim(&dev.join("pp_dpm_sclk")).and_then(|b| dpm_max_mhz(&b)).unwrap_or(0)
+        } else {
+            self.gt_attr("rps_max_freq_mhz", "gt_max_freq_mhz").unwrap_or(0)
+        };
 
         if let Some(h) = &self.hwmon {
-            // power1_max is a microwatt cap. nvtop presents this as if it were a
-            // live reading; it is not, and it never changes.
-            self.stat.power_max_w = read_f64(&h.join("power1_max")).map(|v| v / 1e6).unwrap_or(0.0);
+            // power1_max (i915) and power1_cap (amdgpu) are microwatt caps.
+            // nvtop presents i915's as if it were a live reading; it is not, and
+            // it never changes. An APU's figures are the whole package's, so
+            // none is shown for one.
+            if !self.integrated {
+                self.stat.power_max_w = read_f64(&h.join("power1_max"))
+                    .or_else(|| read_f64(&h.join("power1_cap")))
+                    .map(|v| v / 1e6)
+                    .unwrap_or(0.0);
+            }
 
             // Intel publishes no TjMax for its Arc cards — it is absent from ARK,
             // from the Arc thermal article, and from the driver, which exposes
@@ -235,11 +319,20 @@ impl Reader {
             // own support article treats as warranting action. It is a *display scale*,
             // not a vendor specification, and must not be quoted as one. The
             // authoritative overheating signal is throttle_reason_thermal.
-            self.stat.temp_max_c = read_f64(&h.join("temp1_crit"))
-                .or_else(|| read_f64(&h.join("temp1_max")))
+            //
+            // amdgpu publishes a real `_crit` for each sensor it labels, so its
+            // ceiling is the vendor's own limit.
+            let stem = self
+                .temp
+                .as_ref()
+                .and_then(|p| p.file_name()?.to_str()?.strip_suffix("_input").map(String::from))
+                .unwrap_or_else(|| "temp1".into());
+            self.stat.temp_max_c = read_f64(&h.join(format!("{}_crit", stem)))
+                .or_else(|| read_f64(&h.join(format!("{}_max", stem))))
                 .map(|v| v / 1000.0)
                 .filter(|v| *v > 0.0)
                 .unwrap_or(90.0);
+            self.stat.temp_label = read_trim(&h.join(format!("{}_label", stem))).unwrap_or_default();
         }
 
         if let Some((up, root)) = &self.link_nodes {
@@ -252,8 +345,12 @@ impl Reader {
             };
         }
 
-        self.stat.bar_bytes = bar_size(&dev, 2).unwrap_or(0);
-        self.stat.vram_total_bytes = vram_debugfs(&self.pci).map(|(_, t)| t).unwrap_or(0);
+        self.stat.bar_bytes = bar_size(&dev, if self.amd { 0 } else { 2 }).unwrap_or(0);
+        self.stat.vram_total_bytes = if self.amd {
+            read_u64(&dev.join("mem_info_vram_total")).unwrap_or(0)
+        } else {
+            vram_debugfs(&self.pci).map(|(_, t)| t).unwrap_or(0)
+        };
     }
 
     /// Drops the energy baseline, so power after a pause is not averaged over
@@ -287,14 +384,19 @@ impl Reader {
         }
 
         if let Some(h) = &self.hwmon {
-            d.temp_c = read_f64(&h.join("temp1_input")).map(|v| v / 1000.0);
+            d.temp_c = self.temp.as_ref().and_then(|p| read_f64(p)).map(|v| v / 1000.0);
             d.fan_rpm = read_u64(&h.join("fan1_input"));
 
             // i915 publishes no power1_input on discrete cards, only a
             // cumulative energy counter in microjoules, so draw must be
             // differentiated. A kernel that does provide an instantaneous
-            // reading is used as such.
-            if let Some(uw) = read_f64(&h.join("power1_input")) {
+            // reading is used as such. amdgpu has `power1_input` on newer
+            // firmware and `power1_average` on older; an APU's is the
+            // package's, and is left out.
+            let instant = read_f64(&h.join("power1_input")).or_else(|| read_f64(&h.join("power1_average")));
+            if self.integrated {
+                // The package's draw, not the GPU's; left out.
+            } else if let Some(uw) = instant {
                 d.power_w = Some(uw / 1e6);
             } else if let Some(uj) = read_u64(&h.join("energy1_input")) {
                 let now = Instant::now();
@@ -334,6 +436,16 @@ impl Reader {
             .link_nodes
             .as_ref()
             .and_then(|(up, _)| Link::read(up, "current_link_speed", "current_link_width"));
+        if self.amd {
+            let dev = self.card.join("device");
+            d.gpu_busy_pct = read_f64(&dev.join("gpu_busy_percent"));
+            d.mem_busy_pct = read_f64(&dev.join("mem_busy_percent"));
+            d.sclk_mhz = self.sclk.as_ref().and_then(|p| read_f64(p)).map(|hz| hz / 1e6);
+            // A plain sysfs counter, cheap to read at any rate.
+            d.vram_used_bytes = read_u64(&dev.join("mem_info_vram_used"));
+            return d;
+        }
+
         // `i915_gem_objects` walks the buddy allocator's free lists under its
         // lock, and VRAM occupancy moves slowly, so it is refreshed at most once
         // a second whatever the sampling rate.
@@ -464,17 +576,33 @@ mod tests {
 \te20b  Battlemage G21 [Arc B580]\n\
 \t9a49  TigerLake-LP GT2 [Iris Xe Graphics]\n\
 \t1234  Plain Name\n\
+1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\
+\t164e  Raphael\n\
+\t73a5  Navi 21 [Radeon RX 6950 XT]\n\
 8087  Intel Corporation\n\
 \t56a5  Not this one\n\
 C 00  Unclassified device\n";
 
     #[test]
     fn names_come_from_pci_ids() {
-        assert_eq!(pci_ids_name(PCI_IDS, "56a5").as_deref(), Some("Arc A380 (DG2)"));
-        assert_eq!(pci_ids_name(PCI_IDS, "3e92").as_deref(), Some("UHD Graphics 630 (CoffeeLake-S GT2)"));
-        assert_eq!(pci_ids_name(PCI_IDS, "1234").as_deref(), Some("Plain Name"));
-        assert_eq!(pci_ids_name(PCI_IDS, "0869"), None, "subsystem lines are not devices");
-        assert_eq!(pci_ids_name(PCI_IDS, "ffff"), None);
+        assert_eq!(pci_ids_name(PCI_IDS, "8086", "56a5").as_deref(), Some("Arc A380 (DG2)"));
+        assert_eq!(
+            pci_ids_name(PCI_IDS, "8086", "3e92").as_deref(),
+            Some("UHD Graphics 630 (CoffeeLake-S GT2)")
+        );
+        assert_eq!(pci_ids_name(PCI_IDS, "8086", "1234").as_deref(), Some("Plain Name"));
+        assert_eq!(pci_ids_name(PCI_IDS, "8086", "0869"), None, "subsystem lines are not devices");
+        assert_eq!(pci_ids_name(PCI_IDS, "8086", "ffff"), None);
+        assert_eq!(pci_ids_name(PCI_IDS, "1002", "73a5").as_deref(), Some("Radeon RX 6950 XT (Navi 21)"));
+        assert_eq!(pci_ids_name(PCI_IDS, "1002", "164e").as_deref(), Some("Raphael"));
+        assert_eq!(pci_ids_name(PCI_IDS, "1002", "56a5"), None, "IDs are per vendor");
+    }
+
+    #[test]
+    fn dpm_tables() {
+        assert_eq!(dpm_max_mhz("0: 500Mhz \n1: 2550Mhz *\n2: 2720Mhz \n"), Some(2720));
+        assert_eq!(dpm_max_mhz("0: 3000Mhz *\n"), Some(3000));
+        assert_eq!(dpm_max_mhz(""), None);
     }
 
     #[test]

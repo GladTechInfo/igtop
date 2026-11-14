@@ -1,12 +1,12 @@
 [package]
 name = "igtop"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
-description = "Terminal monitor for Intel GPUs on the i915 driver"
+description = "Terminal monitor for Intel (i915) and AMD (amdgpu) GPUs"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/lukazibi83/igtop"
 readme = "README.md"
-keywords = ["intel", "gpu", "i915", "monitor", "tui"]
+keywords = ["gpu", "intel", "amd", "monitor", "tui"]
 categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
@@ -23,9 +23,10 @@ section = "utils"
 priority = "optional"
 extended-description = """\
 Terminal monitor for Intel GPUs on the i915 driver (Arc Alchemist and integrated \
-graphics): per-engine utilisation from the i915 PMU, achieved clock, temperature, \
-power, VRAM and throttle reasons, and per-process attribution labelled with the \
-container or VM each process runs in. Needs root."""
+graphics) and AMD GPUs on amdgpu, side by side in one instance: per-engine \
+utilisation, achieved clock, temperature, power, VRAM and throttle reasons, and \
+per-process attribution labelled with the container or VM each process runs in. \
+Needs root for Intel cards, and to see every process on AMD ones."""
 recommends = "hwdata | pci.ids"
 assets = [
     ["target/release/igtop", "usr/bin/", "755"],

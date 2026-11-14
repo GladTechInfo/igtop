@@ -18,6 +18,9 @@ const EVENT_SOURCES: &str = "/sys/bus/event_source/devices";
 /// was written for transcoding, so the media engines are the headline.
 pub const ENGINE_ORDER: [&str; 5] = ["vcs", "vecs", "rcs", "bcs", "ccs"];
 
+/// The classes that make up the MEDIA headline, on either driver.
+pub const MEDIA_CLASSES: [&str; 5] = ["vcs", "vecs", "dec", "enc", "jpeg"];
+
 pub fn engine_label(class: &str) -> &'static str {
     match class {
         "vcs" => "VIDEO",
@@ -25,6 +28,13 @@ pub fn engine_label(class: &str) -> &'static str {
         "rcs" => "RENDER",
         "bcs" => "COPY",
         "ccs" => "COMPUTE",
+        // amdgpu classes; see `amdgpu::ENGINES`.
+        "dec" => "DECODE",
+        "enc" => "ENCODE",
+        "jpeg" => "JPEG",
+        "gfx" => "GFX",
+        "dma" => "DMA",
+        "compute" => "COMPUTE",
         _ => "OTHER",
     }
 }

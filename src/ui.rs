@@ -4,7 +4,7 @@
 //! reasons: a label, bar and figure share one row, and each cell of the bar
 //! gets its own colour from the ramp — a gauge paints one flat colour.
 
-use crate::app::Gpu;
+use crate::app::{Driver, Gpu};
 use crate::pmu::engine_label;
 use crate::theme::*;
 use ratatui::prelude::*;
@@ -27,6 +27,8 @@ pub struct View<'a> {
     pub focus: Option<usize>,
     pub interval_ms: u64,
     pub paused: bool,
+    /// i915 cards left out because their PMU could not be opened.
+    pub unavailable: usize,
 }
 
 /// Compact byte formatting: the value column is narrow and `5.94 GiB` reads no
@@ -206,6 +208,12 @@ fn draw_header(f: &mut Frame, area: Rect, v: &View) {
             Style::default().fg(WARN).add_modifier(Modifier::BOLD),
         ));
     }
+    if v.unavailable > 0 {
+        spans.push(Span::styled(
+            format!("  {} Intel GPU{} not shown: needs root", v.unavailable, if v.unavailable == 1 { "" } else { "s" }),
+            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+        ));
+    }
     spans.push(Span::styled(
         "   q quit  c clients  h history  s smooth  g gpu  i icons  space pause  +/- rate",
         Style::default().fg(CHROME),
@@ -232,6 +240,12 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
                 if g.pmu_failed { " PMU read failed — figures frozen " } else { "" },
                 Style::default().fg(WARN).add_modifier(Modifier::BOLD),
             ),
+            // amdgpu's engines are summed from the clients this process can
+            // see; without root that is only the user's own.
+            Span::styled(
+                if g.partial { " not root — own processes only " } else { "" },
+                Style::default().fg(AMBER),
+            ),
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -239,7 +253,7 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
         return;
     }
 
-    let engines = g.reader.engines.len();
+    let engines = g.engines.len();
     let caps = capacity_rows(g, v.smooth).len();
     // The client table needs a fixed, known height: title, header, one row per
     // client. Everything left over belongs to the history graph, which is the
@@ -281,15 +295,27 @@ fn draw_summary(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
     let ic = icons(v.icons);
     let d = &g.dynamic;
     let s = &g.sample;
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled("rc6 ", Style::default().fg(DIM)),
-        Span::styled(format!("{:.0}%", g.rc6_pct()), Style::default().fg(TEXT)),
-        Span::styled("   awake ", Style::default().fg(DIM)),
-        Span::styled(format!("{:.0}%", s.awake_pct), Style::default().fg(TEXT)),
-        Span::styled("   irq ", Style::default().fg(DIM)),
-        Span::styled(format!("{:.0}/s", s.interrupts_per_s), Style::default().fg(TEXT)),
-    ];
+    let figure = |label: &'static str, value: String| {
+        [Span::styled(label, Style::default().fg(DIM)), Span::styled(value, Style::default().fg(TEXT))]
+    };
+    let mut spans = vec![Span::raw("  ")];
+    match g.driver {
+        Driver::I915 => {
+            spans.extend(figure("rc6 ", format!("{:.0}%", g.rc6_pct())));
+            spans.extend(figure("   awake ", format!("{:.0}%", s.awake_pct)));
+            spans.extend(figure("   irq ", format!("{:.0}/s", s.interrupts_per_s)));
+        }
+        // The firmware's own load figures, as a cross-check on the engine
+        // bars, which amdgpu does not count the way i915's PMU does.
+        Driver::Amdgpu => {
+            if let Some(p) = d.gpu_busy_pct {
+                spans.extend(figure("gfx load ", format!("{:.0}%", p)));
+            }
+            if let Some(p) = d.mem_busy_pct {
+                spans.extend(figure("   mem load ", format!("{:.0}%", p)));
+            }
+        }
+    }
     if let Some(cur) = d.link_cur {
         spans.push(Span::styled(format!("   {} ", ic.link), Style::default().fg(DIM)));
         // Judged against what this slot can actually train to, not the card's
@@ -327,6 +353,12 @@ fn engine_icon(class: &str, ic: &Icons) -> (&'static str, Color) {
         "rcs" => (ic.render, VIOLET),
         "bcs" => (ic.copy, DIM),
         "ccs" => (ic.compute, MINT),
+        "dec" => (ic.video, TITLE),
+        "enc" => (ic.enhance, BLUE),
+        "jpeg" => (ic.video, BLUE),
+        "gfx" => (ic.render, VIOLET),
+        "dma" => (ic.copy, DIM),
+        "compute" => (ic.compute, MINT),
         _ => (ic.render, DIM),
     }
 }
@@ -343,7 +375,7 @@ fn bar_width(area: Rect) -> usize {
 fn draw_engines(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
     let ic = icons(v.icons);
     let vals = g.engine_values(v.smooth);
-    let mut rows = Vec::with_capacity(g.reader.engines.len() + 1);
+    let mut rows = Vec::with_capacity(g.engines.len() + 1);
 
     // The headline sits directly above the engines it summarises: the busiest
     // of the video and enhance engines, which on a transcoding box is the one
@@ -360,7 +392,7 @@ fn draw_engines(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
     });
 
     let mut prev = "";
-    for (i, e) in g.reader.engines.iter().enumerate() {
+    for (i, e) in g.engines.iter().enumerate() {
         let pct = vals.get(i).copied().unwrap_or(0.0);
         let class = if e.class == prev { "" } else { engine_label(&e.class) };
         prev = &e.class;
@@ -465,7 +497,7 @@ fn draw_history(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
     }
     let empty = std::collections::VecDeque::new();
     let data: Vec<u64> = visible(g.history_of(idx, v.smooth).unwrap_or(&empty), w).collect();
-    let name = g.reader.engines.get(idx).map(|e| e.name.clone()).unwrap_or_default();
+    let name = g.engines.get(idx).map(|e| e.name.clone()).unwrap_or_default();
     // Peak over what is actually on screen, so the label and the graph agree.
     let peak = data.iter().copied().max().unwrap_or(0);
     // One column per second (`app::HISTORY`), so the span shown is the count.
@@ -498,6 +530,26 @@ fn draw_history(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
     f.render_widget(Sparkline::default().data(bars).max(100), strip);
 }
 
+/// The client table's engine columns, as `(header, fdinfo keys added together)`.
+/// Copy and DMA are left out on both: they are rarely what a process is
+/// waiting on, and the table is narrow.
+pub fn client_columns(driver: Driver) -> [(&'static str, &'static [&'static str]); 4] {
+    match driver {
+        Driver::I915 => [
+            ("VIDEO", &["video"]),
+            ("ENHANCE", &["video-enhance"]),
+            ("RENDER", &["render"]),
+            ("COMPUTE", &["compute"]),
+        ],
+        Driver::Amdgpu => [
+            ("DECODE", &["dec"]),
+            ("ENCODE", &["enc", "enc_1"]),
+            ("GFX", &["gfx"]),
+            ("COMPUTE", &["compute"]),
+        ],
+    }
+}
+
 fn draw_clients(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
     let ic = icons(v.icons);
     let block = Block::default()
@@ -527,17 +579,25 @@ fn draw_clients(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
         return;
     }
 
-    let header =
-        Row::new(vec!["PID", "WHERE", "PROCESS", "VIDEO", "ENHANCE", "RENDER", "COMPUTE", "MEM"])
-        .style(Style::default().fg(DIM));
+    let columns = client_columns(g.driver);
+    let header = Row::new(
+        ["PID", "WHERE", "PROCESS"]
+            .into_iter()
+            .chain(columns.iter().map(|(h, _)| *h))
+            .chain(std::iter::once("MEM"))
+            .collect::<Vec<_>>(),
+    )
+    .style(Style::default().fg(DIM));
     let cap = (area.height as usize).saturating_sub(2);
     let rows: Vec<Row> = g
         .clients
         .iter()
         .take(cap)
         .map(|c| {
-            let get = |k: &str| c.engines.get(k).copied().unwrap_or(0.0);
-            let cells = [get("video"), get("video-enhance"), get("render"), get("compute")];
+            let get = |keys: &[&str]| {
+                keys.iter().filter_map(|k| c.engines.get(*k)).fold(0.0, |a, b| a + b).min(100.0)
+            };
+            let cells = columns.iter().map(|(_, keys)| get(keys));
             let mut r = vec![
                 Cell::from(c.pid.to_string()).style(Style::default().fg(DIM)),
                 Cell::from(c.container.clone().unwrap_or_else(|| "host".into()))
@@ -659,6 +719,7 @@ mod tests {
             focus: None,
             interval_ms: 1000,
             paused: false,
+            unavailable: 0,
         };
         let mut term = ratatui::Terminal::new(TestBackend::new(40, 6)).unwrap();
         term.draw(|f| draw_history(f, f.area(), &g, &view)).unwrap();
@@ -684,6 +745,7 @@ mod tests {
                 focus: None,
                 interval_ms: 1000,
                 paused: false,
+                unavailable: 0,
             };
             motion_signature(&view, 120)
         };
@@ -764,6 +826,7 @@ mod tests {
                     focus: None,
                     interval_ms: 1000,
                     paused: false,
+                    unavailable: 0,
                 };
                 term.draw(|f| draw(f, &view)).unwrap();
             }

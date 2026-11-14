@@ -1,7 +1,11 @@
-//! Per-GPU state: joins the PMU, sysfs and client sources and keeps history.
+//! Per-GPU state: joins the engine, sysfs and client sources and keeps history.
+//!
+//! A `Gpu` is driver-neutral above its `Source`, so i915 and amdgpu cards sit
+//! side by side in one list and one display.
 
-use crate::clients::{ClientRate, ClientTracker};
-use crate::pmu::{self, PmuDevice, PmuReader, PmuSample};
+use crate::amdgpu;
+use crate::clients::{self, ClientRate, ClientTracker};
+use crate::pmu::{self, EngineDef, PmuDevice, PmuReader, PmuSample};
 use crate::sysfs;
 use std::collections::VecDeque;
 use std::fs;
@@ -71,14 +75,43 @@ fn push(rings: &mut [VecDeque<u64>], i: usize, value: f64, times: usize) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Driver {
+    I915,
+    Amdgpu,
+}
+
+impl Driver {
+    pub fn name(self) -> &'static str {
+        match self {
+            Driver::I915 => "i915",
+            Driver::Amdgpu => "amdgpu",
+        }
+    }
+}
+
+/// Where the engine figures come from.
+pub enum Source {
+    /// i915's PMU: system-wide busy counters per engine.
+    I915(PmuReader),
+    /// amdgpu has no PMU; engines are summed from every client's fdinfo.
+    Amd(amdgpu::EngineReader),
+}
+
 pub struct Gpu {
     pub pmu_name: String,
     pub pci_addr: Option<String>,
-    pub reader: PmuReader,
+    pub driver: Driver,
+    source: Source,
+    /// The engines shown, in display order.
+    pub engines: Vec<EngineDef>,
+    /// amdgpu figures cover only processes this one may inspect: all of them
+    /// as root, the user's own otherwise.
+    pub partial: bool,
     pub sysfs: Option<sysfs::Reader>,
     pub sample: PmuSample,
     pub dynamic: sysfs::Dynamic,
-    /// One ring per engine, parallel to `reader.engines`, holding busy percent.
+    /// One ring per engine, parallel to `engines`, holding busy percent.
     /// Damped copy of `sample.engine_busy`, for display only. The raw values
     /// remain untouched, so `--once` and the history sparkline stay honest.
     pub smooth: Vec<f64>,
@@ -104,15 +137,24 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    pub fn new(dev: &PmuDevice, card: Option<PathBuf>) -> std::io::Result<Self> {
-        let reader = PmuReader::open(dev)?;
-        let n = reader.engines.len();
-        Ok(Gpu {
-            pmu_name: dev.pmu_name.clone(),
-            pci_addr: dev.pci_addr.clone(),
-            reader,
+    fn with_source(
+        pmu_name: String,
+        pci_addr: Option<String>,
+        driver: Driver,
+        source: Source,
+        engines: Vec<EngineDef>,
+        card: Option<PathBuf>,
+    ) -> Self {
+        let n = engines.len();
+        Gpu {
+            pmu_name,
+            pci_addr,
+            driver,
+            source,
+            engines,
+            partial: false,
             sysfs: card.map(sysfs::Reader::new),
-            sample: PmuSample::default(),
+            sample: PmuSample { engine_busy: vec![0.0; n], ..Default::default() },
             smooth: vec![0.0; n],
             smooth_primed: false,
             cap_smooth: [0.0; CAPACITY],
@@ -126,33 +168,50 @@ impl Gpu {
             clients: Vec::new(),
             tracker: ClientTracker::new(),
             pmu_failed: false,
-        })
+        }
+    }
+
+    pub fn new(dev: &PmuDevice, card: Option<PathBuf>) -> std::io::Result<Self> {
+        let reader = PmuReader::open(dev)?;
+        let engines = reader.engines.clone();
+        Ok(Self::with_source(
+            dev.pmu_name.clone(),
+            dev.pci_addr.clone(),
+            Driver::I915,
+            Source::I915(reader),
+            engines,
+            card,
+        ))
+    }
+
+    /// An amdgpu card. Nothing here needs privilege to open, so this cannot
+    /// fail; without root the figures are partial, and `partial` says so.
+    pub fn new_amd(pci: &str, card: PathBuf) -> Self {
+        let mut g = Self::with_source(
+            "amdgpu".into(),
+            Some(pci.to_string()),
+            Driver::Amdgpu,
+            Source::Amd(amdgpu::EngineReader::new()),
+            amdgpu::engine_defs(),
+            Some(card),
+        );
+        g.partial = unsafe { libc::geteuid() } != 0;
+        g
     }
 
     /// A GPU with engines but no counters or sysfs, for rendering tests.
     #[cfg(test)]
     pub fn fake(engines: Vec<pmu::EngineDef>) -> Self {
-        let n = engines.len();
-        Gpu {
-            pmu_name: "i915_test".into(),
-            pci_addr: Some("0000:03:00.0".into()),
-            reader: PmuReader::fake(engines),
-            sysfs: None,
-            sample: PmuSample { engine_busy: vec![0.0; n], ..Default::default() },
-            smooth: vec![0.0; n],
-            smooth_primed: true,
-            cap_smooth: [0.0; CAPACITY],
-            cap_primed: [false; CAPACITY],
-            decay_tau: damping_tau(DEFAULT_DAMPING_S),
-            dynamic: sysfs::Dynamic::default(),
-            history: vec![VecDeque::with_capacity(HISTORY); n],
-            history_smooth: vec![VecDeque::with_capacity(HISTORY); n],
-            hist_acc: vec![0.0; n],
-            hist_acc_s: 0.0,
-            clients: Vec::new(),
-            tracker: ClientTracker::new(),
-            pmu_failed: false,
-        }
+        let mut g = Self::with_source(
+            "i915_test".into(),
+            Some("0000:03:00.0".into()),
+            Driver::I915,
+            Source::I915(PmuReader::fake(engines.clone())),
+            engines,
+            None,
+        );
+        g.smooth_primed = true;
+        g
     }
 
     pub fn name(&self) -> String {
@@ -211,13 +270,12 @@ impl Gpu {
         }
     }
 
-    /// The headline figure for a transcoding box: the busiest video engine.
+    /// The headline figure for a transcoding box: the busiest media engine.
     pub fn media_busy(&self, smooth: bool) -> f64 {
-        self.reader
-            .engines
+        self.engines
             .iter()
             .zip(self.engine_values(smooth).iter())
-            .filter(|(e, _)| e.class == "vcs" || e.class == "vecs")
+            .filter(|(e, _)| pmu::MEDIA_CLASSES.contains(&e.class.as_str()))
             .map(|(_, v)| *v)
             .fold(0.0_f64, f64::max)
     }
@@ -291,7 +349,10 @@ impl Gpu {
     /// Discards every rate baseline — PMU, energy and clients — so the first
     /// readings after a pause cover a fresh interval rather than the pause.
     pub fn reset_rates(&mut self) {
-        self.reader.reset();
+        match &mut self.source {
+            Source::I915(r) => r.reset(),
+            Source::Amd(r) => r.reset(),
+        }
         self.hist_acc.iter_mut().for_each(|a| *a = 0.0);
         self.hist_acc_s = 0.0;
         if let Some(sf) = self.sysfs.as_mut() {
@@ -347,7 +408,19 @@ impl Gpu {
     }
 
     pub fn tick(&mut self, scan_clients: bool) {
-        match self.reader.sample() {
+        // amdgpu's engines come from the client scan itself, so it is made on
+        // every tick, and the table, when due, is fed from the same scan.
+        let mut scanned = None;
+        let result = match &mut self.source {
+            Source::I915(r) => r.sample(),
+            Source::Amd(r) => {
+                let list = clients::scan(self.pci_addr.as_deref());
+                let s = r.sample(&list);
+                scanned = Some(list);
+                Ok(s)
+            }
+        };
+        match result {
             Ok(Some(s)) => {
                 // The first real reading is adopted outright; ramping up from
                 // zero would render as a spike that never happened.
@@ -369,6 +442,14 @@ impl Gpu {
             self.dynamic = sf.sample();
         }
 
+        // amdgpu's clock is the achieved shader clock at this instant; there is
+        // no integral to divide, so the averaged figures are the same reading.
+        if self.driver == Driver::Amdgpu {
+            let mhz = self.dynamic.sclk_mhz.unwrap_or(0.0);
+            self.sample.actual_freq_mhz = mhz;
+            self.sample.actual_freq_avg_mhz = mhz;
+        }
+
         // As with the engines, each gauge's first real reading is adopted
         // outright rather than ramped up to from zero. Power needs two energy
         // readings, so it arrives a tick after the rest.
@@ -383,7 +464,10 @@ impl Gpu {
         // Gated to ~1 Hz by the caller regardless of refresh rate: fdinfo
         // counters move slowly and nothing is gained by reading them faster.
         if scan_clients {
-            self.clients = self.tracker.update(self.pci_addr.as_deref());
+            self.clients = match scanned {
+                Some(list) => self.tracker.update_with(list),
+                None => self.tracker.update(self.pci_addr.as_deref()),
+            };
         }
     }
 }

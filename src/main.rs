@@ -1,4 +1,5 @@
-//! igtop — an i915 GPU monitor built on the i915 PMU.
+//! igtop — a GPU monitor for Intel cards on i915, built on the i915 PMU, and
+//! AMD cards on amdgpu, built on fdinfo. Both kinds show in one instance.
 //!
 //! Written because nvtop misreports Intel Arc cards in several independent ways:
 //! it reads `gt_cur_freq_mhz` (the requested cap) as though it were the achieved
@@ -6,6 +7,7 @@
 //! static `power1_max` cap as a live figure, and shows itself in the process
 //! list whilst missing the transcoder inside the container.
 
+mod amdgpu;
 mod app;
 mod clients;
 mod perf;
@@ -52,7 +54,7 @@ impl Default for Args {
 }
 
 const USAGE: &str = "\
-igtop — i915 / Intel Arc GPU monitor
+igtop — GPU monitor for Intel (i915) and AMD (amdgpu) cards
 
 USAGE:
     igtop [OPTIONS]
@@ -113,6 +115,12 @@ CLOCK:
     are `key=value` pairs; a value containing spaces, quotes or control
     characters is double-quoted with \\\\ \\\" and \\xNN escapes. Process names
     come from inside containers and are never printed raw.
+
+AMD:
+    amdgpu has no PMU. Its engine bars are every client's fdinfo busy time
+    added up, so they count a job from when it reaches the hardware ring, and
+    see only processes igtop may inspect: run as root to see them all. The
+    firmware's own gfx and memory load are shown beside them as a check.
 
 NOTE:
     The i915 PMU is a system-wide event source. With perf_event_paranoid at 4
@@ -219,20 +227,24 @@ fn no_gpu_message() -> String {
     let xe = pmu::cards_on_driver("xe");
     if !xe.is_empty() {
         return format!(
-            "no i915 GPUs found. {} driven by the xe driver ({}), which igtop does not \
+            "no supported GPUs found. {} driven by the xe driver ({}), which igtop does not \
              support yet: xe publishes a different PMU and fdinfo format.",
             if xe.len() == 1 { "One card is" } else { "Cards are" },
             xe.join(", ")
         );
     }
-    "no i915 GPUs found: no i915 PMU under /sys/bus/event_source/devices \
-     (is there an Intel GPU on the i915 driver? `lspci -k` shows the driver)"
+    "no supported GPUs found: no i915 PMU under /sys/bus/event_source/devices and no \
+     card on amdgpu (`lspci -k` shows each card's driver)"
         .into()
 }
 
-fn build(args: &Args) -> Result<Vec<app::Gpu>, String> {
+/// The GPUs to show, and a note for each i915 card whose PMU could not be
+/// opened while others were: on a machine with an AMD card too, running
+/// without root would otherwise drop the Intel card without a word.
+fn build(args: &Args) -> Result<(Vec<app::Gpu>, Vec<String>), String> {
     let devices = pmu::discover();
-    if devices.is_empty() {
+    let amd = amdgpu::discover();
+    if devices.is_empty() && amd.is_empty() {
         return Err(no_gpu_message());
     }
 
@@ -241,54 +253,70 @@ fn build(args: &Args) -> Result<Vec<app::Gpu>, String> {
     // A filter that matches nothing is a wrong address, not a permissions
     // problem, and must not fall through to the "needs root" message below.
     if let Some(filter) = &args.device {
-        if !resolved.iter().any(|(d, _)| d.pci_addr.as_deref() == Some(filter.as_str())) {
-            let found: Vec<String> =
-                resolved.iter().filter_map(|(d, _)| d.pci_addr.clone()).collect();
+        let found: Vec<String> = resolved
+            .iter()
+            .filter_map(|(d, _)| d.pci_addr.clone())
+            .chain(amd.iter().map(|(pci, _)| pci.clone()))
+            .collect();
+        if !found.iter().any(|a| a == filter) {
             return Err(format!(
-                "no i915 GPU at {} (found: {}). PCI addresses move when cards do; see --list",
+                "no GPU at {} (found: {}). PCI addresses move when cards do; see --list",
                 filter,
                 if found.is_empty() { "none".into() } else { found.join(", ") }
             ));
         }
     }
+    let wanted = |pci: Option<&str>| args.device.as_deref().is_none_or(|f| pci == Some(f));
 
     let mut gpus = Vec::new();
-    let mut first_err: Option<String> = None;
+    let mut errors: Vec<String> = Vec::new();
 
     for (dev, card) in resolved {
-        if let Some(filter) = &args.device {
-            if dev.pci_addr.as_deref() != Some(filter.as_str()) {
-                continue;
-            }
+        if !wanted(dev.pci_addr.as_deref()) {
+            continue;
         }
         match app::Gpu::new(&dev, card) {
             Ok(mut g) => {
                 g.set_damping(args.damping);
                 gpus.push(g)
             }
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(format!("{}: {}", dev.pmu_name, e));
-                }
-            }
+            Err(e) => errors.push(format!(
+                "{} ({}): {}",
+                dev.pmu_name,
+                dev.pci_addr.as_deref().unwrap_or("-"),
+                e
+            )),
         }
     }
-
-    if gpus.is_empty() {
-        let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "?".into());
-        let uid = unsafe { libc::geteuid() };
-        return Err(format!(
-            "could not open any i915 PMU counters ({})\n\
-             euid={}  perf_event_paranoid={}\n\
-             This needs root: a system-wide PMU is unreadable without CAP_PERFMON.",
-            first_err.unwrap_or_else(|| "no devices matched".into()),
-            uid,
-            paranoid
-        ));
+    for (pci, card) in amd {
+        if !wanted(Some(&pci)) {
+            continue;
+        }
+        let mut g = app::Gpu::new_amd(&pci, card);
+        g.set_damping(args.damping);
+        gpus.push(g);
     }
-    Ok(gpus)
+
+    if !gpus.is_empty() {
+        return Ok((gpus, errors));
+    }
+    Err(format!(
+        "could not open any i915 PMU counters ({})\n{}",
+        errors.into_iter().next().unwrap_or_else(|| "no devices matched".into()),
+        needs_root()
+    ))
+}
+
+fn needs_root() -> String {
+    let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "?".into());
+    let uid = unsafe { libc::geteuid() };
+    format!(
+        "euid={}  perf_event_paranoid={}\n\
+         This needs root: a system-wide PMU is unreadable without CAP_PERFMON.",
+        uid, paranoid
+    )
 }
 
 fn main() {
@@ -310,12 +338,14 @@ fn main() {
     };
 
     if args.list {
-        let devices = pmu::discover();
-        if devices.is_empty() {
+        // In the order the TUI shows them, which is what `--focus` counts.
+        let devices = app::resolve(&pmu::discover());
+        let amd = amdgpu::discover();
+        if devices.is_empty() && amd.is_empty() {
             eprintln!("igtop: {}", no_gpu_message());
             std::process::exit(1);
         }
-        for d in devices {
+        for (d, _) in devices {
             println!(
                 "{:<24} type={:<4} pci={:<13} engines: {}",
                 d.pmu_name,
@@ -324,10 +354,19 @@ fn main() {
                 d.engines.iter().map(|e| e.name.clone()).collect::<Vec<_>>().join(" ")
             );
         }
+        for (pci, _) in amd {
+            println!(
+                "{:<24} type={:<4} pci={:<13} engines: {}",
+                "amdgpu",
+                "-",
+                pci,
+                amdgpu::engine_defs().iter().map(|e| e.name.clone()).collect::<Vec<_>>().join(" ")
+            );
+        }
         return;
     }
 
-    let mut gpus = match build(&args) {
+    let (mut gpus, unavailable) = match build(&args) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("igtop: {}", e);
@@ -336,11 +375,17 @@ fn main() {
     };
 
     if args.once {
+        for e in &unavailable {
+            eprintln!("igtop: not shown: {}", e);
+        }
+        if !unavailable.is_empty() {
+            eprintln!("igtop: {}", needs_root().replace('\n', "\nigtop: "));
+        }
         snapshot(&mut gpus, &args);
         return;
     }
 
-    if let Err(e) = run_tui(&mut gpus, args) {
+    if let Err(e) = run_tui(&mut gpus, args, unavailable.len()) {
         ratatui::restore();
         eprintln!("igtop: {}", e);
         std::process::exit(1);
@@ -365,7 +410,7 @@ fn snapshot(gpus: &mut [app::Gpu], args: &Args) {
             g.name(),
             g.pci_addr.clone().unwrap_or_else(|| "-".into())
         );
-        for (i, e) in g.reader.engines.iter().enumerate() {
+        for (i, e) in g.engines.iter().enumerate() {
             println!(
                 "  engine {:<6} {:>6.2}%",
                 e.name,
@@ -373,19 +418,35 @@ fn snapshot(gpus: &mut [app::Gpu], args: &Args) {
             );
         }
         let na = |o: Option<String>| o.unwrap_or_else(|| "n/a".into());
-        println!("  pmu_status        {}", if g.pmu_failed { "read-failed" } else { "ok" });
-        println!("  freq_act_mhz      {:.0}", g.sample.actual_freq_mhz);
-        println!("  freq_req_mhz      {:.0}", g.sample.requested_freq_mhz);
-        println!("  freq_act_avg_mhz  {:.0}", g.sample.actual_freq_avg_mhz);
-        println!("  freq_req_avg_mhz  {:.0}", g.sample.requested_freq_avg_mhz);
-        println!("  freq_cap_mhz      {}", st.freq_max_mhz);
-        println!("  rc6_pct           {:.2}", g.rc6_pct());
-        println!("  rc6_pmu_pct       {:.2}", g.sample.rc6_pct);
-        println!("  awake_pct         {:.2}", g.sample.awake_pct);
-        println!("  irq_per_s         {:.0}", g.sample.interrupts_per_s);
+        println!("  driver            {}", g.driver.name());
+        match g.driver {
+            app::Driver::I915 => {
+                println!("  pmu_status        {}", if g.pmu_failed { "read-failed" } else { "ok" });
+                println!("  freq_act_mhz      {:.0}", g.sample.actual_freq_mhz);
+                println!("  freq_req_mhz      {:.0}", g.sample.requested_freq_mhz);
+                println!("  freq_act_avg_mhz  {:.0}", g.sample.actual_freq_avg_mhz);
+                println!("  freq_req_avg_mhz  {:.0}", g.sample.requested_freq_avg_mhz);
+                println!("  freq_cap_mhz      {}", st.freq_max_mhz);
+                println!("  rc6_pct           {:.2}", g.rc6_pct());
+                println!("  rc6_pmu_pct       {:.2}", g.sample.rc6_pct);
+                println!("  awake_pct         {:.2}", g.sample.awake_pct);
+                println!("  irq_per_s         {:.0}", g.sample.interrupts_per_s);
+            }
+            app::Driver::Amdgpu => {
+                println!("  engine_scope      {}", if g.partial { "own-processes" } else { "all" });
+                println!("  gpu_busy_pct      {}", na(g.dynamic.gpu_busy_pct.map(|p| format!("{:.0}", p))));
+                println!("  mem_busy_pct      {}", na(g.dynamic.mem_busy_pct.map(|p| format!("{:.0}", p))));
+                println!("  freq_act_mhz      {:.0}", g.sample.actual_freq_mhz);
+                println!("  freq_cap_mhz      {}", st.freq_max_mhz);
+            }
+        }
         println!("  power_w           {}", na(g.dynamic.power_w.map(|w| format!("{:.2}", w))));
         println!("  power_max_w       {:.0}", st.power_max_w);
         println!("  temp_c            {}", na(g.dynamic.temp_c.map(|t| format!("{:.1}", t))));
+        println!("  temp_max_c        {:.0}", st.temp_max_c);
+        if !st.temp_label.is_empty() {
+            println!("  temp_sensor       {}", st.temp_label);
+        }
         println!("  vram_used_b       {}", na(g.dynamic.vram_used_bytes.map(|u| u.to_string())));
         println!(
             "  vram_total_b      {}",
@@ -403,21 +464,39 @@ fn snapshot(gpus: &mut [app::Gpu], args: &Args) {
                 g.dynamic.throttles.join(",")
             }
         );
+        // Each driver's own fdinfo engine names, so a parser sees what the
+        // kernel calls them: i915's output is unchanged from earlier versions.
+        let keys: &[(&str, &[&str])] = match g.driver {
+            app::Driver::I915 => &[
+                ("video", &["video"]),
+                ("enhance", &["video-enhance"]),
+                ("render", &["render"]),
+                ("copy", &["copy"]),
+                ("compute", &["compute"]),
+            ],
+            app::Driver::Amdgpu => &[
+                ("dec", &["dec"]),
+                ("enc", &["enc", "enc_1"]),
+                ("jpeg", &["jpeg"]),
+                ("gfx", &["gfx"]),
+                ("dma", &["dma"]),
+                ("compute", &["compute"]),
+            ],
+        };
         for c in g.clients.iter() {
-            let e = |k: &str| c.engines.get(k).copied().unwrap_or(0.0);
-            println!(
-                "  client pid={} where={} comm={} video={:.1}% enhance={:.1}% render={:.1}% \
-                 copy={:.1}% compute={:.1}% mem_b={}",
+            let mut line = format!(
+                "  client pid={} where={} comm={}",
                 c.pid,
                 quote(c.container.as_deref().unwrap_or("host")),
-                quote(&c.comm),
-                e("video"),
-                e("video-enhance"),
-                e("render"),
-                e("copy"),
-                e("compute"),
-                c.mem_resident,
+                quote(&c.comm)
             );
+            for (name, ks) in keys {
+                // Folded from +0.0: an empty float `sum()` is -0.0, printed "-0.0%".
+                let pct = ks.iter().filter_map(|k| c.engines.get(*k)).fold(0.0, |a, b| a + b);
+                line.push_str(&format!(" {}={:.1}%", name, pct.min(100.0)));
+            }
+            line.push_str(&format!(" mem_b={}", c.mem_resident));
+            println!("{}", line);
         }
     }
 }
@@ -434,7 +513,7 @@ fn prime(gpus: &mut [app::Gpu], scan_clients: bool, interval_ms: u64) {
     }
 }
 
-fn run_tui(gpus: &mut Vec<app::Gpu>, args: Args) -> io::Result<()> {
+fn run_tui(gpus: &mut Vec<app::Gpu>, args: Args, unavailable: usize) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let host = hostname();
     let mut interval = args.interval_ms;
@@ -510,6 +589,7 @@ fn run_tui(gpus: &mut Vec<app::Gpu>, args: Args) -> io::Result<()> {
                 focus,
                 interval_ms: interval,
                 paused,
+                unavailable,
             };
             // A frame that only advances the animation is drawn only if a bar
             // has moved by at least a displayable step; see `motion_signature`.

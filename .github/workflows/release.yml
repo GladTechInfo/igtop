@@ -74,7 +74,7 @@ jobs:
           path: dist/
 
   # Install, run and remove each package where it would be used. There is no
-  # GPU in a container, so a run must end in igtop's own "no i915 GPUs found" error:
+  # GPU in a container, so a run must end in igtop's own "no supported GPUs found" error:
   # that proves the binary starts, reads sysfs and exits cleanly.
   test:
     needs: build
@@ -119,8 +119,8 @@ jobs:
           set -e
           echo "$out"
           echo "$list"
-          [ "$rc" = 1 ] && echo "$out" | grep -q 'no i915 GPUs found'
-          [ "$lrc" = 1 ] && echo "$list" | grep -q 'no i915 GPUs found'
+          [ "$rc" = 1 ] && echo "$out" | grep -q 'no supported GPUs found'
+          [ "$lrc" = 1 ] && echo "$list" | grep -q 'no supported GPUs found'
 
       - name: Remove
         run: |

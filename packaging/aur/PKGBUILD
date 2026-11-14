@@ -8,7 +8,7 @@
 pkgname=igtop
 pkgver=0.1.2
 pkgrel=1
-pkgdesc='Terminal monitor for Intel GPUs on the i915 driver, with per-engine utilisation and per-container attribution'
+pkgdesc='Terminal monitor for Intel (i915) and AMD (amdgpu) GPUs, with per-engine utilisation and per-container attribution'
 arch=('x86_64')
 url='https://github.com/lukazibi83/igtop'
 license=('GPL-3.0-or-later')

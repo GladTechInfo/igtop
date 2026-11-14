@@ -1,7 +1,9 @@
 # igtop
 
 A terminal monitor for Intel GPUs on the `i915` driver — Arc Alchemist cards and
-integrated graphics — that reads the kernel's own counters instead of guessing.
+integrated graphics — and AMD GPUs on `amdgpu`, that reads the kernel's own
+counters instead of guessing. A machine with cards of both makes shows them all
+in one instance.
 
 ![igtop monitoring an Arc A380 during a hardware transcode](docs/screenshot.png)
 
@@ -66,8 +68,20 @@ Panther Lake and later are `xe`-only, and Alchemist cards can optionally be
 bound to `xe` as well. `xe` publishes a different PMU and fdinfo format, so
 igtop finds nothing there and says so.
 
-Developed and tested on an Arc A380 under Linux 7.0, and on a UHD Graphics 630.
-Reports from other cards are welcome.
+**AMD GPUs on `amdgpu`**, discrete and integrated. amdgpu publishes no PMU,
+so the engines are measured differently; see [AMD engines](#amd-engines).
+
+| | Discrete | Integrated (APU) |
+|---|---|---|
+| Engines (decode, encode, JPEG, GFX, DMA, compute), clients | yes | yes |
+| Clock, firmware GFX load, VRAM | yes | yes (VRAM is the carve-out) |
+| Temperature | junction, against its own critical limit | edge |
+| Power, PCIe link | yes | no — the APU's figures are the whole package's |
+| Throttle reasons | not yet | not yet |
+
+Developed and tested on an Arc A380 under Linux 7.0, on a UHD Graphics 630, and
+on a Radeon RX 6950 XT and an integrated Radeon 610M under Linux 7.3. Reports
+from other cards are welcome.
 
 ## Requirements
 
@@ -77,7 +91,9 @@ Reports from other cards are welcome.
 - **Root**, or `CAP_PERFMON`. The i915 PMU is a system-wide event source, and
   with the usual `kernel.perf_event_paranoid` setting an unprivileged process
   cannot open it. Lowering that sysctl affects every process on the machine;
-  running one tool as root is the smaller trade.
+  running one tool as root is the smaller trade. AMD cards work without root,
+  but then count only the user's own processes, and say so; an Intel card
+  that cannot be opened is reported as not shown rather than dropped silently.
 - `debugfs` mounted at `/sys/kernel/debug` for VRAM figures and the fast client
   scan. Without it, VRAM is omitted and clients are found by walking `/proc`.
 - A [Nerd Font](https://www.nerdfonts.com/) for the icons, or `--no-icons`.
@@ -202,6 +218,28 @@ guess. Rates divide by the kernel's own `time_enabled`, read atomically with the
 counters. The PMU is system-wide, so work inside a container is counted from
 the host without entering it.
 
+### AMD engines
+
+amdgpu has no system-wide busy counter. What it publishes is each client's
+cumulative time per engine class in `/proc/<pid>/fdinfo`, so igtop adds up the
+advance of every client on the card over each interval. That is still a time
+ratio, but it differs from i915's PMU in three ways:
+
+- A job counts from when it reaches the hardware ring until it completes, so
+  work queued behind another context's counts as busy. Several contexts on one
+  class can add up to more than wall time; the bar stops at 100 %.
+- Work by a client that exits mid-interval is lost, and a client is measured
+  from its first sighting, so very short-lived clients are undercounted.
+- Only processes igtop may inspect are counted: all of them as root.
+
+The firmware's own `gpu_busy_percent` and `mem_busy_percent` are shown on the
+status line as **gfx load** and **mem load**. They cover the graphics block and
+the memory controller only: during a hardware decode at 86 % the firmware's
+figure read under 10 %, which is why it is not used for the bars.
+
+The clock is hwmon's `sclk`, the shader clock the card is running at the
+moment of sampling: an idle card reads tens of MHz, not its ceiling.
+
 ### Clock
 
 The kernel integrates **0 MHz while the GPU is parked**, so the plain mean over
@@ -251,7 +289,9 @@ when a bar would move by a visible step. `--fps` trades smoothness for CPU;
 
 ## Limitations
 
-- `i915` only; see [Supported hardware](#supported-hardware).
+- `i915` and `amdgpu` only; see [Supported hardware](#supported-hardware).
+- AMD throttle reasons are not shown yet: amdgpu publishes them only inside the
+  binary `gpu_metrics` table, whose layout varies by chip.
 - On parts with a separate media GT (Meteor Lake), CLOCK and rc6 describe the
   primary GT only. The media engines' utilisation is still shown.
 - Container labels cover Proxmox, Docker, Podman and systemd-nspawn. Other
