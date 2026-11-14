@@ -213,21 +213,27 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "localhost".into())
 }
 
+/// Why there is nothing to monitor, shared by the TUI, `--once` and `--list`.
+/// A card on the xe driver is named, since that is the likely surprise.
+fn no_gpu_message() -> String {
+    let xe = pmu::cards_on_driver("xe");
+    if !xe.is_empty() {
+        return format!(
+            "no i915 GPUs found. {} driven by the xe driver ({}), which igtop does not \
+             support yet: xe publishes a different PMU and fdinfo format.",
+            if xe.len() == 1 { "One card is" } else { "Cards are" },
+            xe.join(", ")
+        );
+    }
+    "no i915 GPUs found: no i915 PMU under /sys/bus/event_source/devices \
+     (is there an Intel GPU on the i915 driver? `lspci -k` shows the driver)"
+        .into()
+}
+
 fn build(args: &Args) -> Result<Vec<app::Gpu>, String> {
     let devices = pmu::discover();
     if devices.is_empty() {
-        let xe = pmu::cards_on_driver("xe");
-        if !xe.is_empty() {
-            return Err(format!(
-                "no i915 GPU found. {} driven by the xe driver ({}), which igtop does not \
-                 support yet: xe publishes a different PMU and fdinfo format.",
-                if xe.len() == 1 { "One card is" } else { "Cards are" },
-                xe.join(", ")
-            ));
-        }
-        return Err("no i915 PMU found under /sys/bus/event_source/devices \
-             (is there an Intel GPU on the i915 driver? `lspci -k` shows the driver)"
-            .into());
+        return Err(no_gpu_message());
     }
 
     let resolved = app::resolve(&devices);
@@ -304,7 +310,12 @@ fn main() {
     };
 
     if args.list {
-        for d in pmu::discover() {
+        let devices = pmu::discover();
+        if devices.is_empty() {
+            eprintln!("igtop: {}", no_gpu_message());
+            std::process::exit(1);
+        }
+        for d in devices {
             println!(
                 "{:<24} type={:<4} pci={:<13} engines: {}",
                 d.pmu_name,

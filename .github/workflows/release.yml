@@ -74,7 +74,7 @@ jobs:
           path: dist/
 
   # Install, run and remove each package where it would be used. There is no
-  # GPU in a container, so a run must end in igtop's own "no i915 PMU" error:
+  # GPU in a container, so a run must end in igtop's own "no i915 GPUs found" error:
   # that proves the binary starts, reads sysfs and exits cleanly.
   test:
     needs: build
@@ -115,9 +115,12 @@ jobs:
           igtop --help | head -1
           set +e
           out=$(igtop --once 2>&1); rc=$?
+          list=$(igtop --list 2>&1); lrc=$?
           set -e
           echo "$out"
-          [ "$rc" = 1 ] && echo "$out" | grep -q 'no i915 PMU found'
+          echo "$list"
+          [ "$rc" = 1 ] && echo "$out" | grep -q 'no i915 GPUs found'
+          [ "$lrc" = 1 ] && echo "$list" | grep -q 'no i915 GPUs found'
 
       - name: Remove
         run: |

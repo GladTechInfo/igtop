@@ -1,6 +1,6 @@
 [package]
 name = "igtop"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Terminal monitor for Intel GPUs on the i915 driver"
 license = "GPL-3.0-or-later"
