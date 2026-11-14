@@ -6,6 +6,8 @@ machine with cards of both makes shows them all in one instance.
 
 ![igtop monitoring an Arc A380 during a hardware transcode](docs/screenshot.png)
 
+![igtop monitoring a Radeon RX 6950 XT through a VA-API transcode: real time, a full-speed burst, then a 4K HEVC pass](docs/screenshot-amd.png)
+
 - **Per-engine utilisation** as true time ratios: every video, video-enhance,
   render, copy and compute engine on Intel; decode, encode, JPEG, GFX, DMA and
   compute on AMD.
