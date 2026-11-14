@@ -9,6 +9,7 @@ pkgbase = igtop
 	depends = libgcc
 	depends = glibc
 	optdepends = hwdata: GPU model names
+	options = !debug
 	source = igtop-0.1.1.tar.gz::https://github.com/lukazibi83/igtop/archive/refs/tags/v0.1.1.tar.gz
 	sha256sums = d0dffea4e041fa738c6679fe9d369ac3b06a1a46d023f92e46877bfd9bffad7a
 
