@@ -6,7 +6,7 @@
 # may lag the latest release; the AUR copy is always current.
 
 pkgname=igtop
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc='Terminal monitor for Intel GPUs on the i915 driver, with per-engine utilisation and per-container attribution'
 arch=('x86_64')
@@ -18,7 +18,7 @@ optdepends=('hwdata: GPU model names')
 # The release profile strips the binary, so a -debug package would be empty.
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('d0dffea4e041fa738c6679fe9d369ac3b06a1a46d023f92e46877bfd9bffad7a')
+sha256sums=('05191aba34ab7210c0d866231953aa223babdc284d714cb98b208f4a5bcf411e')
 
 prepare() {
   cd "$pkgname-$pkgver"
