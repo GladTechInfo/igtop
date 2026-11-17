@@ -70,6 +70,7 @@ OPTIONS:
         --damping <SEC>   seconds for a bar to fall ~90% (default 4, min 0.2)
         --fps <N>         animation frame rate (default 30, 5-240)
     -g, --focus <N>       start showing only GPU N (see --list order)
+    -V, --version         version
     -h, --help            this text
 
 KEYS:
@@ -139,6 +140,10 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "-h" | "--help" => {
                 print!("{}", USAGE);
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("igtop {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "-i" | "--interval" => {

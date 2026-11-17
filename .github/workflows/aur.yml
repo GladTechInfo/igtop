@@ -77,8 +77,8 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/igtop.git aur
           cp PKGBUILD .SRCINFO aur/
           cd aur
-          git config user.name lukazibi83
-          git config user.email 205174930+lukazibi83@users.noreply.github.com
+          git config user.name GladTechInfo
+          git config user.email 205174930+GladTechInfo@users.noreply.github.com
           git add PKGBUILD .SRCINFO
           if git diff --cached --quiet; then
             echo "AUR already up to date"

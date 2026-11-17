@@ -1,8 +1,8 @@
 pkgbase = igtop
-	pkgdesc = Terminal monitor for Intel GPUs on the i915 driver, with per-engine utilisation and per-container attribution
-	pkgver = 0.1.2
+	pkgdesc = Terminal monitor for Intel (i915) and AMD (amdgpu) GPUs, with per-engine utilisation and per-container attribution
+	pkgver = 0.2.0
 	pkgrel = 1
-	url = https://github.com/lukazibi83/igtop
+	url = https://github.com/GladTechInfo/igtop
 	arch = x86_64
 	license = GPL-3.0-or-later
 	makedepends = cargo
@@ -10,7 +10,7 @@ pkgbase = igtop
 	depends = glibc
 	optdepends = hwdata: GPU model names
 	options = !debug
-	source = igtop-0.1.2.tar.gz::https://github.com/lukazibi83/igtop/archive/refs/tags/v0.1.2.tar.gz
-	sha256sums = 05191aba34ab7210c0d866231953aa223babdc284d714cb98b208f4a5bcf411e
+	source = igtop-0.2.0.tar.gz::https://github.com/GladTechInfo/igtop/archive/refs/tags/v0.2.0.tar.gz
+	sha256sums = 806a3162de9eac40cfc58879773970020abbb607871e2f053cf4727b537b5111
 
 pkgname = igtop

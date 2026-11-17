@@ -24,6 +24,26 @@ the media engines are the headline, but it works for any workload.
 igtop is an independent project, unaffiliated with Intel or AMD, and is not
 part of Intel's `igt-gpu-tools`.
 
+**Contents:** [Quick start](#quick-start) ·
+[Why not nvtop?](#why-not-nvtop-intel_gpu_top-or-amdgpu_top) ·
+[Supported hardware](#supported-hardware) · [Requirements](#requirements) ·
+[Installing](#installing) · [Building](#building) · [Usage](#usage) ·
+[The display](#the-display) · [`--once` format](#--once-format) ·
+[How the figures are measured](#how-the-figures-are-measured) ·
+[Troubleshooting](#troubleshooting) · [Limitations](#limitations)
+
+## Quick start
+
+On Debian, Ubuntu or Proxmox:
+
+    ver=$(curl -s https://api.github.com/repos/GladTechInfo/igtop/releases/latest | sed -n 's/.*"tag_name": "v\(.*\)".*/\1/p')
+    curl -LO "https://github.com/GladTechInfo/igtop/releases/download/v$ver/igtop_${ver}-1_amd64.deb"
+    sudo apt install "./igtop_${ver}-1_amd64.deb"
+    sudo igtop --list        # which cards igtop found
+    sudo igtop               # the monitor; q quits
+
+Other distributions: see [Installing](#installing).
+
 ## Why not nvtop, intel_gpu_top or amdgpu_top?
 
 On Intel, nvtop misreads Arc cards in several ways at the time of writing:
@@ -117,24 +137,54 @@ from other cards are welcome.
 
 ## Installing
 
-Each [release](https://github.com/lukazibi83/igtop/releases/latest) carries
-ready-made builds, checked against `SHA256SUMS`:
+Each [release](https://github.com/GladTechInfo/igtop/releases/latest) carries
+ready-made builds:
 
-| File | For |
-|---|---|
-| `igtop_<version>-1_amd64.deb` | Debian, Ubuntu, Proxmox: `sudo apt install ./igtop_*.deb` |
-| `igtop-<version>-1.x86_64.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE: `sudo dnf install ./igtop-*.rpm` (or `zypper install`) |
-| `igtop-<version>-x86_64-linux` | Any x86-64 Linux: a static binary, no dependencies; `chmod +x` and run |
+| File | For | Installs to |
+|---|---|---|
+| `igtop_<version>-1_amd64.deb` | Debian, Ubuntu, Proxmox VE | `/usr/bin/igtop` |
+| `igtop-<version>-1.x86_64.rpm` | Fedora, RHEL, Rocky, Alma, openSUSE | `/usr/bin/igtop` |
+| `igtop-<version>-x86_64-linux` | Any x86-64 Linux, including Alpine | wherever you put it |
+| `SHA256SUMS` | Checksums of the three above | |
 
 All three contain the same static binary, so they behave identically on any
-distribution. Each is installed and run in containers of the distributions it
-is for before a release is published.
+distribution and need no libraries. Before a release's files are uploaded,
+each package is installed, run and removed in containers of Debian 12 and 13,
+Ubuntu 22.04 and 24.04, Fedora, Rocky Linux 9, openSUSE Tumbleweed and Alpine.
 
-**Arch Linux and derivatives:** an AUR package is on its way (AUR account
-registration is paused at the time of writing). Until then, build the same
-package from this repository:
+### Download and check
 
-    git clone https://github.com/lukazibi83/igtop
+    # the latest release; or set ver=X.Y.Z for a particular one
+    ver=$(curl -s https://api.github.com/repos/GladTechInfo/igtop/releases/latest | sed -n 's/.*"tag_name": "v\(.*\)".*/\1/p')
+    base=https://github.com/GladTechInfo/igtop/releases/download/v$ver
+    curl -LO "$base/SHA256SUMS"
+    curl -LO "$base/igtop_${ver}-1_amd64.deb"      # or the .rpm, or the binary
+    sha256sum --check --ignore-missing SHA256SUMS  # must print "OK"
+
+### Install
+
+    sudo apt install ./igtop_*_amd64.deb                         # Debian, Ubuntu, Proxmox
+    sudo dnf install ./igtop-*.x86_64.rpm                        # Fedora, RHEL and rebuilds
+    sudo zypper install --allow-unsigned-rpm ./igtop-*.x86_64.rpm   # openSUSE
+    sudo install -m 0755 igtop-*-x86_64-linux /usr/local/bin/igtop  # anything else
+
+`igtop --version` confirms what is installed. The packages are not signed;
+`SHA256SUMS` is the check that a download is the one published here.
+
+### Updating and removing
+
+To update, install the newer package the same way; `apt` and `dnf` replace the
+old version. To remove: `sudo apt remove igtop`, `sudo dnf remove igtop`,
+`sudo zypper remove igtop`, or delete the binary you copied. igtop keeps no
+configuration or state files, so nothing else is left behind.
+
+### Arch Linux and derivatives
+
+An AUR package is on its way (AUR account registration is paused at the time
+of writing). Until then, build the same package from this repository; it
+compiles igtop from the release's source:
+
+    git clone https://github.com/GladTechInfo/igtop
     cd igtop/packaging/aur && makepkg -si
 
 ## Building
@@ -168,20 +218,42 @@ Tests:
 
 ## Usage
 
+igtop needs root for Intel cards; see [Requirements](#requirements).
+
     sudo igtop                 # TUI: 1 s sampling, 30 fps animation
-    sudo igtop --once          # one plain-text snapshot, for scripts
     sudo igtop --list          # list detected GPUs and exit
     sudo igtop -d 03:00.0      # one card only; short or full (0000:03:00.0) form
-    sudo igtop --no-smooth     # raw, undamped values
-    sudo igtop --damping 6     # seconds for a bar to fall ~90% (default 4)
-    sudo igtop --fps 60        # smoother animation, at more CPU
-    sudo igtop --no-icons      # ASCII markers if the font lacks Nerd Font glyphs
+    sudo igtop -g 1            # start on the second card of --list; g cycles
+    sudo igtop --once          # one plain-text snapshot, for scripts
+    sudo igtop -i 250          # sample four times a second
 
-`igtop --help` lists every option.
+| Option | Meaning | Default |
+|---|---|---|
+| `-i`, `--interval <MS>` | sampling interval, 50–10000 ms | 1000 |
+| `-d`, `--device <PCI>` | show one card only, `0000:BB:DD.F` or `BB:DD.F` | all |
+| `-g`, `--focus <N>` | start showing only card *N*, in `--list` order | all |
+| `--once` | print one plain-text snapshot and exit | |
+| `--list` | list detected cards and exit | |
+| `--no-clients` | skip the per-process scan (cheaper on a busy host) | |
+| `--no-smooth` | raw, undamped bars | damped |
+| `--damping <SEC>` | seconds for a bar to fall ~90 %, at least 0.2 | 4 |
+| `--fps <N>` | animation frame rate, 5–240 | 30 |
+| `--no-icons` | ASCII markers instead of Nerd Font glyphs | icons |
+| `-V`, `--version` | print the version and exit | |
+| `-h`, `--help` | the full help text, with notes on each figure | |
 
-**Keys:** `q` quit · `c` client table · `h` history · `s` damping on/off ·
-`g` cycle GPU (all → first → second → … → all) · `i` icons · `space` pause ·
-`+`/`-` refresh rate (50, 100, 250, 500, 1000, 2000, 5000, 10000 ms).
+**Keys**
+
+| Key | Action |
+|---|---|
+| `q`, `Esc` | quit |
+| `space` | pause and resume |
+| `+`, `-` | sampling interval: 50, 100, 250, 500, 1000, 2000, 5000, 10000 ms |
+| `g` | cycle the card shown: all → first → second → … → all |
+| `c` | show or hide the client table |
+| `h` | show or hide the history graph |
+| `s` | damping on or off |
+| `i` | icons or ASCII |
 
 Resuming from a pause, or showing the client table again, starts every rate
 afresh, so the first reading never averages the gap.
@@ -226,17 +298,45 @@ without root says **not root — own processes only**.
 
 ## `--once` format
 
-GPU figures are `key value` lines, the value running to end of line. A
-`driver` line says which driver the card is on; the keys that follow are that
-driver's (`rc6_pct` and `freq_req_mhz` on Intel, `gpu_busy_pct` and
-`engine_scope` on AMD, for example). Each client is a line of `key=value`
-pairs, its engine keys named as the driver names them (`video`, `render`, …;
-`dec`, `gfx`, …).
+`--once` samples for half a second, prints one snapshot and exits, so it can
+feed a script, a cron job or a monitoring agent. Each card starts with a
+heading line; its figures follow as indented `key value` lines, the value
+running to end of line. For an Arc A380 at idle (abridged):
+
+    Arc A380 (DG2) [0000:03:00.0]
+      engine vcs0     0.00%
+      engine vecs0    0.00%
+      engine rcs0     0.00%
+      driver            i915
+      pmu_status        ok
+      freq_act_mhz      0
+      freq_act_avg_mhz  0
+      freq_cap_mhz      2450
+      rc6_pct           99.97
+      power_w           16.54
+      temp_c            55.0
+      vram_used_b       21262336
+      vram_total_b      6383730688
+      link_cur          8.0 GT/s x8
+      throttle          none
+      client pid=4242 where="CT 101" comm="Plex Transcoder" video=38.5% enhance=12.0% render=0.0% copy=0.0% compute=0.0% mem_b=184549376
+
+The `driver` line says which driver the card is on, and the keys that follow
+are that driver's (`rc6_pct` and `freq_req_mhz` on Intel, `gpu_busy_pct` and
+`engine_scope` on AMD, for example). Sizes are in bytes (`_b`), clocks in MHz,
+power in watts. Each client is one line of `key=value` pairs, its engine keys
+named as the driver names them (`video`, `enhance`, `render`, `copy`,
+`compute` on Intel; `dec`, `enc`, `jpeg`, `gfx`, `dma`, `compute` on AMD).
+`--no-clients` leaves the client lines out.
 
 A value containing spaces, quotes or control characters is double-quoted with
-`\\`, `\"` and `\xNN` escapes — for example `where="CT 101" comm="Plex
-Transcoder"`. Process names are set by whatever runs in a container, so they
-are never printed raw. Piping into `head` exits quietly.
+`\\`, `\"` and `\xNN` escapes, as in `where="CT 101"` above. Process names are
+set by whatever runs in a container, so they are never printed raw. Piping into
+`head` exits quietly.
+
+Example: report any video engine above 90 %:
+
+    sudo igtop --once --no-clients | awk '$1=="engine" && $2 ~ /^vcs/ && $3+0 > 90 {print "busy:", $2, $3}'
 
 ## How the figures are measured
 
@@ -325,6 +425,36 @@ default 30 fps during a transcode, less when idle, since a frame is drawn only
 when a bar would move by a visible step. `--fps` trades smoothness for CPU;
 `--no-smooth` draws only on each sample.
 
+## Troubleshooting
+
+**`no supported GPUs found`.** igtop found no card on `i915` or `amdgpu`.
+`lspci -k | grep -A3 -E 'VGA|Display'` shows the driver in use: `xe` is not
+supported yet, `vfio-pci` means the card is passed through to a VM (run igtop
+inside that VM instead), and no driver at all means the module is not loaded.
+
+**An Intel card is listed as not shown, or the PMU cannot be opened.** Run
+igtop as root (or with `CAP_PERFMON`). Lowering `kernel.perf_event_paranoid`
+also works, but affects every process on the machine.
+
+**AMD figures say `not root — own processes only`.** Without root igtop can
+read only your own processes' fdinfo, so the engine bars count only your work.
+Run it with `sudo`.
+
+**No VRAM figure, or a slow client scan, on Intel.** `debugfs` is not
+mounted: `sudo mount -t debugfs none /sys/kernel/debug`.
+
+**Squares or question marks instead of icons.** The terminal font has no
+Nerd Font glyphs. Install a [Nerd Font](https://www.nerdfonts.com/) or use
+`--no-icons`.
+
+**The client table is empty while the engines are busy.** Per-client figures
+need Linux 5.19 or later (6.5 or later for Intel parts using GuC submission).
+On Intel, a client's figure can also trail the engine bars by a few seconds;
+see [Clients](#clients).
+
+**`Illegal instruction` from a binary you built yourself.** See
+[Building](#building): your Rust standard library contains AVX-512.
+
 ## Limitations
 
 - `i915` and `amdgpu` only; see [Supported hardware](#supported-hardware).
@@ -334,6 +464,13 @@ when a bar would move by a visible step. `--fps` trades smoothness for CPU;
   describe the primary GT only. The media engines' utilisation is still shown.
 - Container labels cover Proxmox, Docker, Podman and systemd-nspawn. Other
   runtimes show as `host`.
+
+## Reporting problems
+
+Bug reports and readings from cards not listed above are welcome as
+[issues](https://github.com/GladTechInfo/igtop/issues). Please include
+`igtop --version`, `igtop --list`, the kernel version (`uname -r`) and, where
+the figures look wrong, the output of `sudo igtop --once`.
 
 ## Licence
 

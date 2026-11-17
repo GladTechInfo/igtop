@@ -1,10 +1,10 @@
 [package]
 name = "igtop"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Terminal monitor for Intel (i915) and AMD (amdgpu) GPUs"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/lukazibi83/igtop"
+repository = "https://github.com/GladTechInfo/igtop"
 readme = "README.md"
 keywords = ["gpu", "intel", "amd", "monitor", "tui"]
 categories = ["command-line-utilities", "hardware-support"]
@@ -17,8 +17,8 @@ libc = "0.2"
 # Debian and Ubuntu package (`cargo deb`). Release builds package the static
 # musl binary, so the package has no library dependencies.
 [package.metadata.deb]
-maintainer = "lukazibi83 <205174930+lukazibi83@users.noreply.github.com>"
-copyright = "lukazibi83"
+maintainer = "GladTechInfo <205174930+GladTechInfo@users.noreply.github.com>"
+copyright = "GladTechInfo"
 section = "utils"
 priority = "optional"
 extended-description = """\
