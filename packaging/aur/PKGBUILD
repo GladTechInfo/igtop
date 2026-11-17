@@ -6,7 +6,7 @@
 # may lag the latest release; the AUR copy is always current.
 
 pkgname=igtop
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc='Terminal monitor for Intel (i915) and AMD (amdgpu) GPUs, with per-engine utilisation and per-container attribution'
 arch=('x86_64')
@@ -18,7 +18,7 @@ optdepends=('hwdata: GPU model names')
 # The release profile strips the binary, so a -debug package would be empty.
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('806a3162de9eac40cfc58879773970020abbb607871e2f053cf4727b537b5111')
+sha256sums=('8ca6c67fd20129b38ab310726c955d764b0da4bbcd5e27cfc4b8db7769d6525f')
 
 prepare() {
   cd "$pkgname-$pkgver"
