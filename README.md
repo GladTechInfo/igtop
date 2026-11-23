@@ -124,22 +124,29 @@ video-enhance engine (`vecs0`) are busy; the client table names the transcoder a
 
 ## 4. Quick Start
 
-On **Debian, Ubuntu or Proxmox VE**, the quickest way is the ready-made package from the latest
-release:
+On any x86-64 Linux, one command installs the latest release:
 
 ```sh
-ver=$(curl -s https://api.github.com/repos/GladTechInfo/igtop/releases/latest | sed -n 's/.*"tag_name": "v\(.*\)".*/\1/p')
-curl -LO "https://github.com/GladTechInfo/igtop/releases/download/v$ver/igtop_${ver}-1_amd64.deb"
-sudo apt install "./igtop_${ver}-1_amd64.deb"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/GladTechInfo/igtop/main/install.sh)"
 sudo igtop --list      # which cards igtop found
 sudo igtop             # start the monitor; press q to quit
 ```
 
-The first line asks GitHub for the latest version number; the second downloads that version's
-package; the third installs it. igtop needs `sudo` for Intel cards — see
-[Permissions](#permissions).
+The [install script](install.sh) picks the release file for your system — the `.deb` on Debian,
+Ubuntu and Proxmox VE, the `.rpm` on Fedora, RHEL and openSUSE, the static binary in
+`/usr/local/bin` everywhere else, Arch Linux and Alpine included — checks it against the release's
+`SHA256SUMS` and installs it, using `sudo` when you are not root. It prints each command it runs.
+igtop needs `sudo` for Intel cards — see [Permissions](#permissions).
 
-For every other distribution, see [Installation](#5-installation).
+Run the same command again to update. To remove igtop:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/GladTechInfo/igtop/main/install.sh | sh -s -- --uninstall
+```
+
+The script also takes `--version X.Y.Z` (a particular release), `--method deb|rpm|bin` (another
+file than the one it picks) and `--bindir DIR` (where the static binary goes), after `sh -s --` as
+above. To do each step by hand, or to build from source, see [Installation](#5-installation).
 
 ---
 
@@ -350,6 +357,7 @@ For a static binary that runs on other machines, see [Static builds](#static-bui
 
 | Installed with | How to update |
 |---|---|
+| Install script | Run the install command again. |
 | `.deb` package | Download the newer `.deb` and install it the same way; `apt` replaces the old version. |
 | `.rpm` package | Download the newer `.rpm` and install it the same way; `dnf` or `zypper` replaces the old version. |
 | `makepkg` (Arch, CachyOS) | `cd igtop && git pull && cd packaging/aur && makepkg -si` |
@@ -362,6 +370,7 @@ For a static binary that runs on other machines, see [Static builds](#static-bui
 
 | Installed with | How to remove |
 |---|---|
+| Install script | `curl -fsSL https://raw.githubusercontent.com/GladTechInfo/igtop/main/install.sh \| sh -s -- --uninstall` |
 | `.deb` package | `sudo apt remove igtop` |
 | `.rpm` package (Fedora, RHEL) | `sudo dnf remove igtop` |
 | `.rpm` package (openSUSE) | `sudo zypper remove igtop` |
