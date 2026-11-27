@@ -215,7 +215,7 @@ curl -LO "$base/igtop_${ver}-1_amd64.deb"        # Debian, Ubuntu, Proxmox VE
 curl -LO "$base/igtop-${ver}-1.x86_64.rpm"       # Fedora, RHEL, openSUSE
 ```
 
-To install a particular version instead of the latest, set it by hand, for example `ver=0.2.1`.
+To install a particular version instead of the latest, set it by hand, for example `ver=0.2.2`.
 
 **Step 2 — check the download.** This compares the file with the published checksum and must print
 `OK` for the file you downloaded:
@@ -349,7 +349,7 @@ sudo install -m 0755 target/release/igtop /usr/local/bin/igtop
 ```
 
 To build a particular release rather than the latest development state, check out its tag first,
-for example `git checkout v0.2.1`.
+for example `git checkout v0.2.2`.
 
 For a static binary that runs on other machines, see [Static builds](#static-builds).
 
@@ -411,7 +411,7 @@ it affects every program on the machine; running one monitoring tool as root is 
 | `sudo igtop -d 03:00.0` | Shows only the card at PCI address `03:00.0` (the short form or the full `0000:03:00.0`). |
 | `sudo igtop -g 1` | Starts showing only the second card in `--list` order; press `g` to cycle. |
 | `sudo igtop -i 250` | Samples four times a second. |
-| `sudo igtop --no-clients` | Skips the per-process scan, which is cheaper on a very busy host. |
+| `sudo igtop --no-clients` | Hides clients. On i915 this also skips the process scan. AMD still scans at the sampling interval for engine utilisation. |
 | `sudo igtop --once` | Prints one plain-text snapshot and exits. |
 | `sudo igtop --once --no-clients` | The same, without per-process lines. |
 
@@ -628,7 +628,7 @@ largest client's figure. Which buffers overlap between processes is not publishe
 | `-g`, `--focus <N>` | Start showing only card *N* (counting from 0, in `--list` order). | all cards |
 | `--once` | Print one plain-text snapshot and exit. | |
 | `--list` | List the cards found and exit. | |
-| `--no-clients` | Skip the per-process scan. | scan on |
+| `--no-clients` | Hide clients. Only i915 can skip the process scan. | scan on |
 | `--no-smooth` | Raw, undamped bars. | damped |
 | `--damping <SEC>` | Seconds for a bar to fall by about 90 %, 0.2–30 (values outside are clamped). | 4 |
 | `--fps <N>` | Animation frame rate while bars move, 5–240. | 30 |
@@ -678,6 +678,9 @@ Arc A380 (DG2) [0000:03:00.0]
   throttle          none
   client pid=4242 where="CT 101" comm="Plex Transcoder" video=0.5% enhance=0.0% render=0.0% copy=0.0% compute=0.0% mem_b=572084224
 ```
+
+On Intel, `pmu_status` is `ok` after a measured interval, `no-interval` while awaiting a usable pair of readings, or `read-failed` after a PMU read error. Unavailable PMU rates are printed as `n/a`. A measured idle engine prints `0.00%`.
+
 
 Format rules:
 

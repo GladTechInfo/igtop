@@ -64,7 +64,7 @@ OPTIONS:
     -d, --device <PCI>    restrict to one card: 0000:BB:DD.F, or the short BB:DD.F
         --once            print a single plain-text snapshot and exit
         --list            list detected GPUs and exit
-        --no-clients      skip the per-process scan
+        --no-clients      hide clients (i915 also skips the scan; AMD scans for engine rates)
         --no-smooth       show raw values, undamped
         --no-icons        plain ASCII markers instead of Nerd Font glyphs
         --damping <SEC>   seconds for a bar to fall ~90% (default 4, min 0.2)
@@ -246,7 +246,7 @@ fn no_gpu_message() -> String {
 /// The GPUs to show, and a note for each i915 card whose PMU could not be
 /// opened while others were: on a machine with an AMD card too, running
 /// without root would otherwise drop the Intel card without a word.
-fn build(args: &Args) -> Result<(Vec<app::Gpu>, Vec<String>), String> {
+fn build(args: &mut Args) -> Result<(Vec<app::Gpu>, Vec<String>), String> {
     let devices = pmu::discover();
     let amd = amdgpu::discover();
     if devices.is_empty() && amd.is_empty() {
@@ -276,13 +276,17 @@ fn build(args: &Args) -> Result<(Vec<app::Gpu>, Vec<String>), String> {
     let mut gpus = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    for (dev, card) in resolved {
+    let amd_offset = resolved.len();
+    let detected = amd_offset + amd.len();
+    let mut visible = Vec::new();
+    for (index, (dev, card)) in resolved.into_iter().enumerate() {
         if !wanted(dev.pci_addr.as_deref()) {
             continue;
         }
         match app::Gpu::new(&dev, card) {
             Ok(mut g) => {
                 g.set_damping(args.damping);
+                visible.push(index);
                 gpus.push(g)
             }
             Err(e) => errors.push(format!(
@@ -293,15 +297,21 @@ fn build(args: &Args) -> Result<(Vec<app::Gpu>, Vec<String>), String> {
             )),
         }
     }
-    for (pci, card) in amd {
+    for (index, (pci, card)) in amd.into_iter().enumerate() {
         if !wanted(Some(&pci)) {
             continue;
         }
+        visible.push(amd_offset + index);
         let mut g = app::Gpu::new_amd(&pci, card);
         g.set_damping(args.damping);
         gpus.push(g);
     }
 
+    if !args.once {
+        if let Some(index) = args.focus {
+            args.focus = Some(focus_position(index, detected, &visible)?);
+        }
+    }
     if !gpus.is_empty() {
         return Ok((gpus, errors));
     }
@@ -310,6 +320,14 @@ fn build(args: &Args) -> Result<(Vec<app::Gpu>, Vec<String>), String> {
         errors.into_iter().next().unwrap_or_else(|| "no devices matched".into()),
         needs_root()
     ))
+}
+
+fn focus_position(index: usize, detected: usize, visible: &[usize]) -> Result<usize, String> {
+    if index >= detected {
+        return Err(format!("GPU index {index} is out of range ({detected} detected; see --list)"));
+    }
+    visible.iter().position(|&id| id == index)
+        .ok_or_else(|| format!("GPU {index} is unavailable or excluded by --device"))
 }
 
 fn needs_root() -> String {
@@ -334,7 +352,7 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let args = match parse_args() {
+    let mut args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("igtop: {}\n\n{}", e, USAGE);
@@ -371,7 +389,7 @@ fn main() {
         return;
     }
 
-    let (mut gpus, unavailable) = match build(&args) {
+    let (mut gpus, unavailable) = match build(&mut args) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("igtop: {}", e);
@@ -416,26 +434,40 @@ fn snapshot(gpus: &mut [app::Gpu], args: &Args) {
             g.pci_addr.clone().unwrap_or_else(|| "-".into())
         );
         for (i, e) in g.engines.iter().enumerate() {
-            println!(
-                "  engine {:<6} {:>6.2}%",
-                e.name,
-                g.sample.engine_busy.get(i).copied().unwrap_or(0.0)
-            );
+            let value = if g.rate_status == app::RateStatus::Ready {
+                format!("{:>6.2}%", g.sample.engine_busy[i])
+            } else {
+                "n/a".into()
+            };
+            println!("  engine {:<6} {}", e.name, value);
         }
         let na = |o: Option<String>| o.unwrap_or_else(|| "n/a".into());
         println!("  driver            {}", g.driver.name());
         match g.driver {
             app::Driver::I915 => {
-                println!("  pmu_status        {}", if g.pmu_failed { "read-failed" } else { "ok" });
-                println!("  freq_act_mhz      {:.0}", g.sample.actual_freq_mhz);
-                println!("  freq_req_mhz      {:.0}", g.sample.requested_freq_mhz);
-                println!("  freq_act_avg_mhz  {:.0}", g.sample.actual_freq_avg_mhz);
-                println!("  freq_req_avg_mhz  {:.0}", g.sample.requested_freq_avg_mhz);
+                println!("  pmu_status        {}", match g.rate_status {
+                    app::RateStatus::Ready => "ok",
+                    app::RateStatus::Pending => "no-interval",
+                    app::RateStatus::ReadFailed => "read-failed",
+                });
+                let rate = |value: f64, digits: usize| {
+                    if g.rate_status == app::RateStatus::Ready {
+                        format!("{value:.digits$}")
+                    } else {
+                        "n/a".into()
+                    }
+                };
+                println!("  freq_act_mhz      {}", rate(g.sample.actual_freq_mhz, 0));
+                println!("  freq_req_mhz      {}", rate(g.sample.requested_freq_mhz, 0));
+                println!("  freq_act_avg_mhz  {}", rate(g.sample.actual_freq_avg_mhz, 0));
+                println!("  freq_req_avg_mhz  {}", rate(g.sample.requested_freq_avg_mhz, 0));
                 println!("  freq_cap_mhz      {}", st.freq_max_mhz);
-                println!("  rc6_pct           {:.2}", g.rc6_pct());
-                println!("  rc6_pmu_pct       {:.2}", g.sample.rc6_pct);
-                println!("  awake_pct         {:.2}", g.sample.awake_pct);
-                println!("  irq_per_s         {:.0}", g.sample.interrupts_per_s);
+                let rc6 = g.dynamic.rc6_pct.map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| rate(g.sample.rc6_pct, 2));
+                println!("  rc6_pct           {}", rc6);
+                println!("  rc6_pmu_pct       {}", rate(g.sample.rc6_pct, 2));
+                println!("  awake_pct         {}", rate(g.sample.awake_pct, 2));
+                println!("  irq_per_s         {}", rate(g.sample.interrupts_per_s, 0));
             }
             app::Driver::Amdgpu => {
                 println!("  engine_scope      {}", if g.partial { "own-processes" } else { "all" });
@@ -687,6 +719,13 @@ fn run_tui(gpus: &mut Vec<app::Gpu>, args: Args, unavailable: usize) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_keeps_discovery_order() {
+        assert_eq!(focus_position(2, 3, &[1, 2]), Ok(1));
+        assert!(focus_position(0, 3, &[1, 2]).is_err());
+        assert!(focus_position(3, 3, &[1, 2]).is_err());
+    }
 
     #[test]
     fn pci_shorthand() {

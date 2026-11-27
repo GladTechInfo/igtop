@@ -237,7 +237,11 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &Gpu, v: &View) {
             // Without this a failed read leaves the last good figures on screen,
             // looking live.
             Span::styled(
-                if g.pmu_failed { " PMU read failed — figures frozen " } else { "" },
+                match g.rate_status {
+                    crate::app::RateStatus::ReadFailed => " PMU read failed — figures frozen ",
+                    crate::app::RateStatus::Pending => " awaiting measurement ",
+                    crate::app::RateStatus::Ready => "",
+                },
                 Style::default().fg(WARN).add_modifier(Modifier::BOLD),
             ),
             // amdgpu's engines are summed from the clients this process can

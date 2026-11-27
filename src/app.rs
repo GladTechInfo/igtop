@@ -131,9 +131,14 @@ pub struct Gpu {
     hist_acc_s: f64,
     pub clients: Vec<ClientRate>,
     tracker: ClientTracker,
-    /// The last PMU read failed, so every PMU figure on screen is the last good
-    /// one. Shown, rather than leaving a frozen display to pass for a live one.
-    pub pmu_failed: bool,
+    pub rate_status: RateStatus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RateStatus {
+    Pending,
+    Ready,
+    ReadFailed,
 }
 
 impl Gpu {
@@ -167,7 +172,7 @@ impl Gpu {
             hist_acc_s: 0.0,
             clients: Vec::new(),
             tracker: ClientTracker::new(),
-            pmu_failed: false,
+            rate_status: RateStatus::Pending,
         }
     }
 
@@ -349,6 +354,7 @@ impl Gpu {
     /// Discards every rate baseline — PMU, energy and clients — so the first
     /// readings after a pause cover a fresh interval rather than the pause.
     pub fn reset_rates(&mut self) {
+        self.rate_status = RateStatus::Pending;
         match &mut self.source {
             Source::I915(r) => r.reset(),
             Source::Amd(r) => r.reset(),
@@ -373,31 +379,43 @@ impl Gpu {
     /// Adds a sample to the pending history column and emits whole columns.
     ///
     /// Each column is the time-weighted mean over one second of sampled time.
-    /// A sample spanning several seconds (`-i 2000`) fills that many columns, so
-    /// one column is always one second. Rounding gets a twentieth of a second's
-    /// grace, so `-i 250` closes a column on its fourth sample however the
-    /// kernel's intervals jitter; any overshoot carries into the next column at
-    /// the same mean rather than being dropped.
+    /// Split intervals at second boundaries. Whole seconds within a single
+    /// sample share its value; only the final fraction carries forward.
     fn record_history(&mut self, s: &PmuSample) {
-        for (a, v) in self.hist_acc.iter_mut().zip(s.engine_busy.iter()) {
-            *a += v * s.dt_s;
+        let total = self.hist_acc_s + s.dt_s;
+        let first = s.dt_s.min(1.0 - self.hist_acc_s);
+        let columns = total.floor() as usize;
+        let remainder = total.fract();
+        for (i, &busy) in s.engine_busy.iter().enumerate() {
+            self.hist_acc[i] += busy * first;
+            if columns > 0 {
+                push(&mut self.history, i, self.hist_acc[i], 1);
+                push(&mut self.history, i, busy, (columns - 1).min(HISTORY));
+                push(&mut self.history_smooth, i, self.smooth[i], columns.min(HISTORY));
+                self.hist_acc[i] = busy * remainder;
+            }
         }
-        self.hist_acc_s += s.dt_s;
-        let cols = ((self.hist_acc_s + 0.05).floor() as usize).min(HISTORY);
-        if cols == 0 {
-            return;
+        self.hist_acc_s = remainder;
+    }
+
+    fn accept_sample(&mut self, result: std::io::Result<Option<PmuSample>>) {
+        match result {
+            Ok(Some(s)) => {
+                // The first real reading is adopted outright; ramping up from
+                // zero would render as a spike that never happened.
+                if !self.smooth_primed {
+                    for (prev, v) in self.smooth.iter_mut().zip(s.engine_busy.iter()) {
+                        *prev = *v;
+                    }
+                    self.smooth_primed = true;
+                }
+                self.record_history(&s);
+                self.sample = s;
+                self.rate_status = RateStatus::Ready;
+            }
+            Ok(None) => self.rate_status = RateStatus::Pending,
+            Err(_) => self.rate_status = RateStatus::ReadFailed,
         }
-        let rem = (self.hist_acc_s - cols as f64).max(0.0);
-        for i in 0..self.hist_acc.len() {
-            let mean = self.hist_acc[i] / self.hist_acc_s;
-            push(&mut self.history, i, mean, cols);
-            // The damped trace takes the bar's position at the moment the
-            // column closes, so the graph agrees with the bars above it.
-            let damped = self.smooth.get(i).copied().unwrap_or(mean);
-            push(&mut self.history_smooth, i, damped, cols);
-            self.hist_acc[i] = mean * rem;
-        }
-        self.hist_acc_s = rem;
     }
 
     /// Records the current `sample` into history, as a real tick would.
@@ -420,23 +438,7 @@ impl Gpu {
                 Ok(s)
             }
         };
-        match result {
-            Ok(Some(s)) => {
-                // The first real reading is adopted outright; ramping up from
-                // zero would render as a spike that never happened.
-                if !self.smooth_primed {
-                    for (prev, v) in self.smooth.iter_mut().zip(s.engine_busy.iter()) {
-                        *prev = *v;
-                    }
-                    self.smooth_primed = true;
-                }
-                self.record_history(&s);
-                self.sample = s;
-                self.pmu_failed = false;
-            }
-            Ok(None) => self.pmu_failed = false,
-            Err(_) => self.pmu_failed = true,
-        }
+        self.accept_sample(result);
 
         if let Some(sf) = self.sysfs.as_mut() {
             self.dynamic = sf.sample();
@@ -529,6 +531,26 @@ pub fn resolve(devices: &[PmuDevice]) -> Vec<(PmuDevice, Option<PathBuf>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_read_then_baseline_needs_another_sample() {
+        let mut gpu = Gpu::fake(Vec::new());
+        gpu.accept_sample(Err(std::io::Error::other("unavailable")));
+        assert_eq!(gpu.rate_status, RateStatus::ReadFailed);
+        gpu.accept_sample(Ok(None));
+        assert_eq!(gpu.rate_status, RateStatus::Pending);
+        gpu.accept_sample(Ok(Some(PmuSample { dt_s: 1.0, ..Default::default() })));
+        assert_eq!(gpu.rate_status, RateStatus::Ready);
+    }
+
+    #[test]
+    fn history_splits_a_burst_at_the_second_boundary() {
+        let mut gpu = Gpu::fake(amdgpu::engine_defs());
+        for (dt_s, busy) in [(0.9, 0.0), (1.1, 100.0)] {
+            gpu.record_history(&PmuSample { dt_s, engine_busy: vec![busy; 6], ..Default::default() });
+        }
+        assert_eq!(gpu.history[0], VecDeque::from([10, 100]));
+    }
 
     /// Runs the filter at 60 fps for `secs` from `from` toward `to`.
     fn run(from: f64, to: f64, secs: f64) -> f64 {

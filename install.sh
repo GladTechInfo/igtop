@@ -30,6 +30,7 @@ RUN_HINT='sudo igtop'
 VERSION=''
 METHOD=''
 BINDIR=/usr/local/bin
+BINDIR_SET=0
 ACTION=install
 
 # ----------------------------------------------------------------- helpers ---
@@ -63,7 +64,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --version)   VERSION=${2:?--version needs a value}; VERSION=${VERSION#v}; shift 2 ;;
     --method)    METHOD=${2:?--method needs deb, rpm or bin}; shift 2 ;;
-    --bindir)    BINDIR=${2:?--bindir needs a directory}; shift 2 ;;
+    --bindir)    BINDIR=${2:?--bindir needs a directory}; BINDIR_SET=1; shift 2 ;;
     --uninstall) ACTION=uninstall; shift ;;
     -h|--help)   printf 'options: --version X.Y.Z, --method deb|rpm|bin, --bindir DIR, --uninstall\n'; exit 0 ;;
     *)           die "unknown option: $1 (try --help)" ;;
@@ -72,22 +73,40 @@ done
 case $METHOD in ''|deb|rpm|bin) ;; *) die "--method must be deb, rpm or bin, not $METHOD" ;; esac
 
 # --------------------------------------------------------------- uninstall ---
-# Removes the package if one is installed, else the static binary.
+if [ "$BINDIR_SET" = 1 ]; then
+  case $METHOD in ''|bin) METHOD=bin ;; *) die '--bindir requires the bin method' ;; esac
+fi
+
+deb_version() {
+  dpkg-query -W -f='${db:Status-Status} ${Version}' "$NAME" 2>/dev/null |
+    sed -n 's/^installed //p'
+}
+
 if [ $ACTION = uninstall ]; then
-  need_root
-  if have dpkg && dpkg -s "$NAME" >/dev/null 2>&1; then
-    run $SUDO apt-get remove -y "$NAME"
-  elif have rpm && rpm -q "$NAME" >/dev/null 2>&1; then
-    if   have dnf;    then run $SUDO dnf remove -y "$NAME"
-    elif have zypper; then run $SUDO zypper --non-interactive remove "$NAME"
-    else                   run $SUDO rpm -e "$NAME"
+  if [ -z "$METHOD" ]; then
+    if have dpkg-query && [ -n "$(deb_version)" ]; then METHOD=deb
+    elif have rpm && rpm -q "$NAME" >/dev/null 2>&1; then METHOD=rpm
+    else METHOD=bin
     fi
-  elif [ -e "$BINDIR/$NAME" ]; then
-    [ -w "$BINDIR" ] && SUDO=''
-    run $SUDO rm -f "$BINDIR/$NAME"
-  else
-    die "$NAME is not installed (no package, nothing in $BINDIR)"
   fi
+  case $METHOD in
+    deb)
+      [ -n "$(deb_version)" ] || die "$NAME package is not installed"
+      need_root
+      run $SUDO apt-get remove -y "$NAME" ;;
+    rpm)
+      rpm -q "$NAME" >/dev/null 2>&1 || die "$NAME package is not installed"
+      need_root
+      if   have dnf;    then run $SUDO dnf remove -y "$NAME"
+      elif have zypper; then run $SUDO zypper --non-interactive remove "$NAME"
+      elif have yum;    then run $SUDO yum remove -y "$NAME"
+      else                   run $SUDO rpm -e "$NAME"
+      fi ;;
+    bin)
+      [ -e "$BINDIR/$NAME" ] || die "no binary in $BINDIR"
+      if [ -w "$BINDIR" ]; then SUDO=''; else need_root; fi
+      run $SUDO rm -f -- "$BINDIR/$NAME" ;;
+  esac
   say 'removed'
   exit 0
 fi
@@ -139,9 +158,13 @@ case $METHOD in
   bin) FILE="${NAME}-${VERSION}-x86_64-linux" ;;
 esac
 
-# Already this version? (The static binary prints "NAME X.Y.Z" for --version.)
-if have "$NAME" && "$NAME" --version 2>/dev/null | grep -q " $VERSION\$"; then
-  say "$NAME $VERSION is already installed ($(command -v "$NAME"))"
+case $METHOD in
+  deb) installed=$(deb_version); expected="$VERSION-1" ;;
+  rpm) installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$NAME" 2>/dev/null || true); expected="$VERSION-1" ;;
+  bin) installed=$("$BINDIR/$NAME" --version 2>/dev/null || true); expected="$NAME $VERSION" ;;
+esac
+if [ "$installed" = "$expected" ]; then
+  say "$NAME $VERSION is already installed ($METHOD)"
   exit 0
 fi
 
@@ -188,6 +211,10 @@ case $METHOD in
     case ":$PATH:" in *":$BINDIR:"*) ;; *) say "$BINDIR is not on your PATH" ;; esac ;;
 esac
 
-say "done: $("$NAME" --version 2>/dev/null || echo "$NAME $VERSION")"
+say "installed $NAME $VERSION ($METHOD)"
 say "start it with:  $RUN_HINT"
-say "remove it with: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --uninstall"
+if [ "$METHOD" = bin ]; then
+  say "to remove this binary, run install.sh --uninstall --bindir with this directory: $BINDIR"
+else
+  say "remove it with: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --uninstall --method $METHOD"
+fi

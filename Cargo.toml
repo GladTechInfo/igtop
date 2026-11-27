@@ -1,6 +1,6 @@
 [package]
 name = "igtop"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Terminal monitor for Intel (i915) and AMD (amdgpu) GPUs"
